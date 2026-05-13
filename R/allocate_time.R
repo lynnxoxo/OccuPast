@@ -1,12 +1,6 @@
 # allocate_time.R
 #
-# Temporal allocation helpers for the merged occupancy package.
-#
-# Assumes preparation has already been completed with prepare_data.R, so that:
-# - chronology is a strict phase-system table
-# - mortuary data are already burial-level and include UID
-# - chronology linkage happens by phase_id
-# - site metadata may optionally provide fallback bounds and site_size
+# Temporal allocation helpers for OccuPast.
 #
 # Canonical input schemas expected here:
 #
@@ -23,16 +17,16 @@
 #   site_admin, site_start, site_end, site_size, site_dig_date
 #
 # Main design choices:
-# - buckets are half-open intervals [bucket_start, bucket_end)
+# - bins are half-open intervals [bin_start, bin_end)
 # - default chronology profile is trapezoid:
 #     fade_in_start -> horizon_start : linear rise
 #     horizon_start -> horizon_end   : plateau
 #     horizon_end   -> fade_out_end  : linear fall
 # - site metadata fallback uses a simple uniform profile over [site_start, site_end)
 # - allocation modes:
-#     fractional        : keep normalized weights across all overlapping buckets
-#     stochastic        : draw one bucket using normalized weights
-#     deterministic_max : choose the single bucket with maximum normalized weight
+#     fractional        : keep normalized weights across all overlapping bins
+#     stochastic        : draw one bin using normalized weights
+#     deterministic_max : choose the single bin with maximum normalized weight
 
 # -------------------------------------------------------------------------
 # Internal helpers
@@ -80,15 +74,15 @@
     age = character(),
     chronology_source = character(),
     is_synthetic = logical(),
-    horizon_bucket = numeric(),
-    bucket_start = numeric(),
-    bucket_end = numeric(),
+    horizon_bin = numeric(),
+    bin_start = numeric(),
+    bin_end = numeric(),
     overlap_len = numeric(),
     raw_weight = numeric(),
     alloc_weight = numeric(),
     allocation_mode = character(),
     profile = character(),
-    chosen_bucket = logical(),
+    chosen_bin = logical(),
     chosen_prob = numeric()
   )
 }
@@ -107,13 +101,13 @@
 }
 
 # -------------------------------------------------------------------------
-# Bucket helpers
+# Bin helpers
 # -------------------------------------------------------------------------
 
-make_bucket_grid <- function(year_min, year_max,
-                             bucket_width = 25,
-                             offset = 0) {
-  .assert_positive_scalar(bucket_width, "bucket_width")
+make_bin_grid <- function(year_min, year_max,
+                          bin_width = 25,
+                          offset = 0) {
+  .assert_positive_scalar(bin_width, "bin_width")
 
   if (!is.numeric(year_min) || !is.numeric(year_max) ||
       length(year_min) != 1L || length(year_max) != 1L ||
@@ -125,19 +119,19 @@ make_bucket_grid <- function(year_min, year_max,
     rlang::abort("`year_max` must be greater than `year_min`.")
   }
 
-  start0 <- floor((year_min - offset) / bucket_width) * bucket_width + offset
-  end0   <- ceiling((year_max - offset) / bucket_width) * bucket_width + offset
+  start0 <- floor((year_min - offset) / bin_width) * bin_width + offset
+  end0   <- ceiling((year_max - offset) / bin_width) * bin_width + offset
 
-  starts <- seq(start0, end0 - bucket_width, by = bucket_width)
+  starts <- seq(start0, end0 - bin_width, by = bin_width)
 
   tibble::tibble(
-    horizon_bucket = starts,
-    bucket_start = starts,
-    bucket_end = starts + bucket_width
+    horizon_bin = starts,
+    bin_start = starts,
+    bin_end = starts + bin_width
   )
 }
 
-bucket_seq_with_offset <- function(s, e, width, offset = 0, eps = 1e-9) {
+bin_seq_with_offset <- function(s, e, width, offset = 0, eps = 1e-9) {
   if (any(is.na(c(s, e))) || e <= s) return(numeric(0))
   b0 <- floor((s - offset) / width) * width + offset
   b1 <- floor(((e - eps) - offset) / width) * width + offset
@@ -228,59 +222,62 @@ bucket_seq_with_offset <- function(s, e, width, offset = 0, eps = 1e-9) {
 # Overlap / weighting
 # -------------------------------------------------------------------------
 
-weighted_overlaps <- function(fade_in_start,
-                              horizon_start,
-                              horizon_end,
-                              fade_out_end,
-                              bucket_width = 25,
-                              offset = 0,
-                              profile = c("trapezoid", "uniform")) {
+weighted_bin_overlaps <- function(fade_in_start,
+                                  horizon_start,
+                                  horizon_end,
+                                  fade_out_end,
+                                  bin_width = 25,
+                                  offset = 0,
+                                  profile = c("trapezoid", "uniform")) {
   profile <- match.arg(profile)
-  .assert_positive_scalar(bucket_width, "bucket_width")
+  .assert_positive_scalar(bin_width, "bin_width")
 
   eff_start <- fade_in_start
   eff_end <- fade_out_end
 
   if (any(is.na(c(eff_start, eff_end))) || eff_end <= eff_start) {
     return(tibble::tibble(
-      horizon_bucket = numeric(),
-      bucket_start = numeric(),
-      bucket_end = numeric(),
+      horizon_bin = numeric(),
+      bin_start = numeric(),
+      bin_end = numeric(),
       overlap_len = numeric(),
       raw_weight = numeric(),
       alloc_weight = numeric()
     ))
   }
 
-  bks <- bucket_seq_with_offset(eff_start, eff_end, bucket_width, offset)
+  bks <- bin_seq_with_offset(eff_start, eff_end, bin_width, offset)
   if (!length(bks)) {
     return(tibble::tibble(
-      horizon_bucket = numeric(),
-      bucket_start = numeric(),
-      bucket_end = numeric(),
+      horizon_bin = numeric(),
+      bin_start = numeric(),
+      bin_end = numeric(),
       overlap_len = numeric(),
       raw_weight = numeric(),
       alloc_weight = numeric()
     ))
   }
 
-  bucket_start <- bks
-  bucket_end <- bks + bucket_width
+  bin_start <- bks
+  bin_end <- bks + bin_width
 
   overlap_len <- vapply(
-    seq_along(bucket_start),
+    seq_along(bin_start),
     function(i) {
-      max(0, min(eff_end, bucket_end[i]) - max(eff_start, bucket_start[i]))
+      max(0, min(eff_end, bin_end[i]) - max(eff_start, bin_start[i]))
     },
     numeric(1)
   )
 
+  # Allocation follows w_ij ∝ length(I_i ∩ B_j) × g_i(j).
+  # For the trapezoid profile, g_i(j) is integrated over the bin so that
+  # steep fade-in/out intervals are not reduced to midpoint approximations.
   raw_weight <- vapply(
-    seq_along(bucket_start),
+    seq_along(bin_start),
     function(i) {
       .integrate_profile_interval(
-        a = bucket_start[i],
-        b = bucket_end[i],
+        a = bin_start[i],
+        b = bin_end[i],
         fade_in_start = fade_in_start,
         horizon_start = horizon_start,
         horizon_end = horizon_end,
@@ -294,9 +291,9 @@ weighted_overlaps <- function(fade_in_start,
   keep <- overlap_len > 0 & raw_weight > 0
   if (!any(keep)) {
     return(tibble::tibble(
-      horizon_bucket = numeric(),
-      bucket_start = numeric(),
-      bucket_end = numeric(),
+      horizon_bin = numeric(),
+      bin_start = numeric(),
+      bin_end = numeric(),
       overlap_len = numeric(),
       raw_weight = numeric(),
       alloc_weight = numeric()
@@ -304,13 +301,15 @@ weighted_overlaps <- function(fade_in_start,
   }
 
   out <- tibble::tibble(
-    horizon_bucket = bucket_start[keep],
-    bucket_start = bucket_start[keep],
-    bucket_end = bucket_end[keep],
+    horizon_bin = bin_start[keep],
+    bin_start = bin_start[keep],
+    bin_end = bin_end[keep],
     overlap_len = overlap_len[keep],
     raw_weight = raw_weight[keep]
   )
 
+  # Normalize raw interval weights so each burial contributes one unit of
+  # probability mass across all overlapping bins.
   total_w <- sum(out$raw_weight)
   if (!is.finite(total_w) || total_w <= 0) {
     out$alloc_weight <- 1 / nrow(out)
@@ -325,25 +324,27 @@ weighted_overlaps <- function(fade_in_start,
 # Allocation helpers
 # -------------------------------------------------------------------------
 
-choose_one_bucket <- function(weights_tbl,
-                              seed = NULL,
-                              method = c("stochastic", "deterministic_max")) {
+choose_one_bin <- function(weights_tbl,
+                           seed = NULL,
+                           method = c("stochastic", "deterministic_max")) {
   method <- match.arg(method)
 
   if (nrow(weights_tbl) == 0) {
     return(tibble::tibble(
-      horizon_bucket = numeric(),
-      bucket_start = numeric(),
-      bucket_end = numeric(),
+      horizon_bin = numeric(),
+      bin_start = numeric(),
+      bin_end = numeric(),
       overlap_len = numeric(),
       raw_weight = numeric(),
       alloc_weight = numeric(),
-      chosen_bucket = logical(),
+      chosen_bin = logical(),
       chosen_prob = numeric()
     ))
   }
 
   if (method == "deterministic_max") {
+    # Ties are resolved by R's which.max() convention (first maximum).
+    # For publication analyses, stochastic allocation is usually preferred.
     idx <- which.max(weights_tbl$alloc_weight)
   } else {
     if (!is.null(seed)) set.seed(seed)
@@ -355,16 +356,16 @@ choose_one_bucket <- function(weights_tbl,
   }
 
   out <- weights_tbl[idx, , drop = FALSE]
-  out$chosen_bucket <- TRUE
+  out$chosen_bin <- TRUE
   out$chosen_prob <- out$alloc_weight
   out$alloc_weight <- 1
   out
 }
 
-#' Allocate one burial-level row across time buckets
+#' Allocate one burial-level row across time bins
 #'
 #' @description
-#' Allocates a single burial-level record to one or more temporal buckets using
+#' Allocates a single burial-level record to one or more temporal bins using
 #' the chronology bounds attached to its phase or fallback metadata interval.
 #'
 #' The temporal weighting profile is normally trapezoidal at the phase level:
@@ -375,26 +376,26 @@ choose_one_bucket <- function(weights_tbl,
 #' }
 #'
 #' Under \code{allocation_mode = "stochastic"} (the default), the burial is
-#' assigned to exactly one bucket by random draw from the normalized bucket
+#' assigned to exactly one bin by random draw from the normalized bin
 #' weights implied by the temporal profile. This makes each replicate a plausible
 #' temporal realization rather than a deterministic expected-value curve.
 #'
 #' Under \code{allocation_mode = "fractional"}, the burial contributes
-#' proportionally across all overlapping buckets. Under
-#' \code{allocation_mode = "deterministic_max"}, it is assigned to the bucket
+#' proportionally across all overlapping bins. Under
+#' \code{allocation_mode = "deterministic_max"}, it is assigned to the bin
 #' with maximal weight.
 #'
 #' @param row_one Single joined mortuary+chronology row as a one-row data.frame/tibble.
-#' @param bucket_width Width of the temporal buckets.
-#' @param offset Bucket grid offset.
+#' @param bin_width Width of the temporal bins.
+#' @param offset Bin grid offset.
 #' @param allocation_mode One of \code{"stochastic"}, \code{"fractional"}, or
 #'   \code{"deterministic_max"}. Default is \code{"stochastic"}.
 #' @param profile One of \code{"trapezoid"} or \code{"uniform"}.
 #' @param seed Optional seed for stochastic allocation.
 #'
-#' @return Tibble with one or more allocated bucket rows.
+#' @return Tibble with one or more allocated bin rows.
 allocate_one_row <- function(row_one,
-                             bucket_width = 25,
+                             bin_width = 25,
                              offset = 0,
                              allocation_mode = c("stochastic", "fractional", "deterministic_max"),
                              profile = c("trapezoid", "uniform"),
@@ -402,12 +403,12 @@ allocate_one_row <- function(row_one,
   allocation_mode <- match.arg(allocation_mode)
   profile <- match.arg(profile)
 
-  weights_tbl <- weighted_overlaps(
+  weights_tbl <- weighted_bin_overlaps(
     fade_in_start = row_one$fade_in_start[[1]],
     horizon_start = row_one$horizon_start[[1]],
     horizon_end = row_one$horizon_end[[1]],
     fade_out_end = row_one$fade_out_end[[1]],
-    bucket_width = bucket_width,
+    bin_width = bin_width,
     offset = offset,
     profile = profile
   )
@@ -417,11 +418,11 @@ allocate_one_row <- function(row_one,
   }
 
   if (allocation_mode == "fractional") {
-    weights_tbl$chosen_bucket <- FALSE
+    weights_tbl$chosen_bin <- FALSE
     weights_tbl$chosen_prob <- NA_real_
     alloc_tbl <- weights_tbl
   } else {
-    alloc_tbl <- choose_one_bucket(
+    alloc_tbl <- choose_one_bin(
       weights_tbl = weights_tbl,
       seed = seed,
       method = allocation_mode
@@ -444,23 +445,23 @@ allocate_one_row <- function(row_one,
     is_synthetic = row_one$is_synthetic[[1]]
   )
 
-  core[rep(1, nrow(alloc_tbl)), , drop = FALSE] |>
-    tibble::as_tibble() |>
+  core[rep(1, nrow(alloc_tbl)), , drop = FALSE] %>%
+    tibble::as_tibble() %>%
     dplyr::bind_cols(
       alloc_tbl,
       tibble::tibble(
         allocation_mode = allocation_mode,
         profile = profile
       )
-    ) |>
+    ) %>%
     dplyr::select(
       UID, input_type, record_id, burial_id, unwrap_index,
       site_id, phase_id, system_name, phase_name,
       sex_gender, age, chronology_source, is_synthetic,
-      horizon_bucket, bucket_start, bucket_end,
+      horizon_bin, bin_start, bin_end,
       overlap_len, raw_weight, alloc_weight,
       allocation_mode, profile,
-      chosen_bucket, chosen_prob
+      chosen_bin, chosen_prob
     )
 }
 
@@ -721,7 +722,7 @@ resolve_allocation_bounds <- function(mortuary,
 # Main harmonization / allocation
 # -------------------------------------------------------------------------
 
-#' Harmonize chronology and allocate burials across temporal buckets
+#' Harmonize chronology and allocate burials across temporal bins
 #'
 #' @description
 #' Main temporal allocation engine for the merged workflow.
@@ -730,10 +731,10 @@ resolve_allocation_bounds <- function(mortuary,
 #' \code{phase_id}. Each phase defines a trapezoidal temporal profile from
 #' \code{fade_in_start}, \code{horizon_start}, \code{horizon_end}, and
 #' \code{fade_out_end}. These phase-level profiles are then used to assign
-#' burials to temporal buckets.
+#' burials to temporal bins.
 #'
 #' The default mode is \code{"stochastic"}, meaning that each burial is allocated
-#' to exactly one bucket per replicate by random draw from the normalized bucket
+#' to exactly one bin per replicate by random draw from the normalized bin
 #' weights implied by its phase-level trapezoidal profile. This makes between-
 #' replicate variation interpretable as temporal allocation uncertainty.
 #'
@@ -747,8 +748,8 @@ resolve_allocation_bounds <- function(mortuary,
 #' @param mortuary Optional burial-level mortuary tibble.
 #' @param chronology Optional chronology tibble.
 #' @param site_metadata Optional site metadata tibble.
-#' @param bucket_width Width of the temporal buckets.
-#' @param offset Bucket grid offset.
+#' @param bin_width Width of the temporal bins.
+#' @param offset Bin grid offset.
 #' @param allocation_mode One of \code{"stochastic"}, \code{"fractional"}, or
 #'   \code{"deterministic_max"}. Default is \code{"stochastic"}.
 #' @param profile Default temporal profile for phase-based allocation:
@@ -761,7 +762,7 @@ resolve_allocation_bounds <- function(mortuary,
 #'
 #' @return A list with:
 #' \itemize{
-#'   \item \code{data}: bucket-level allocation table
+#'   \item \code{data}: bin-level allocation table
 #'   \item \code{logs}: exclusion and fallback logs
 #'   \item \code{diagnostics}: allocation diagnostics
 #' }
@@ -769,7 +770,7 @@ harmonize_chronologies_merged <- function(prepared_inputs = NULL,
                                           mortuary = NULL,
                                           chronology = NULL,
                                           site_metadata = NULL,
-                                          bucket_width = 25,
+                                          bin_width = 25,
                                           offset = 0,
                                           allocation_mode = c("stochastic", "fractional", "deterministic_max"),
                                           profile = c("trapezoid", "uniform"),
@@ -778,7 +779,7 @@ harmonize_chronologies_merged <- function(prepared_inputs = NULL,
                                           augment_to_site_size = FALSE) {
   allocation_mode <- match.arg(allocation_mode)
   profile <- match.arg(profile)
-  .assert_positive_scalar(bucket_width, "bucket_width")
+  .assert_positive_scalar(bin_width, "bin_width")
 
   if (!is.null(prepared_inputs)) {
     if (is.null(prepared_inputs$data$mortuary) || is.null(prepared_inputs$data$chronology)) {
@@ -836,7 +837,7 @@ harmonize_chronologies_merged <- function(prepared_inputs = NULL,
 
     allocate_one_row(
       row_one = row_i,
-      bucket_width = bucket_width,
+      bin_width = bin_width,
       offset = offset,
       allocation_mode = allocation_mode,
       profile = row_profile,
@@ -857,9 +858,9 @@ harmonize_chronologies_merged <- function(prepared_inputs = NULL,
     n_unique_sites = dplyr::n_distinct(out$site_id),
     n_unique_phases = dplyr::n_distinct(out$phase_id),
     allocation_mode = allocation_mode,
-    bucket_width = bucket_width,
+    bin_width = bin_width,
     offset = offset,
-    mean_buckets_per_UID = if (nrow(out) == 0) 0 else mean(as.numeric(table(out$UID)))
+    mean_bins_per_UID = if (nrow(out) == 0) 0 else mean(as.numeric(table(out$UID)))
   )
 
   list(
@@ -869,4 +870,42 @@ harmonize_chronologies_merged <- function(prepared_inputs = NULL,
     ),
     diagnostics = diagnostics
   )
+}
+
+
+# -------------------------------------------------------------------------
+# Legacy aliases: previous development versions used "bucket" terminology.
+# New code should call the bin-named functions above.
+# -------------------------------------------------------------------------
+
+make_bucket_grid <- function(year_min, year_max, bucket_width = 25, offset = 0) {
+  make_bin_grid(year_min = year_min, year_max = year_max, bin_width = bucket_width, offset = offset)
+}
+
+bucket_seq_with_offset <- function(s, e, width, offset = 0, eps = 1e-9) {
+  bin_seq_with_offset(s = s, e = e, width = width, offset = offset, eps = eps)
+}
+
+weighted_overlaps <- function(fade_in_start,
+                              horizon_start,
+                              horizon_end,
+                              fade_out_end,
+                              bucket_width = 25,
+                              offset = 0,
+                              profile = c("trapezoid", "uniform")) {
+  weighted_bin_overlaps(
+    fade_in_start = fade_in_start,
+    horizon_start = horizon_start,
+    horizon_end = horizon_end,
+    fade_out_end = fade_out_end,
+    bin_width = bucket_width,
+    offset = offset,
+    profile = profile
+  )
+}
+
+choose_one_bucket <- function(weights_tbl,
+                              seed = NULL,
+                              method = c("stochastic", "deterministic_max")) {
+  choose_one_bin(weights_tbl = weights_tbl, seed = seed, method = method)
 }
