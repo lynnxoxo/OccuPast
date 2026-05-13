@@ -2661,49 +2661,87 @@ test_sex_cluster_interaction <- function(measure_tbl,
 
   required <- c("value", "cluster", "sex_gender")
   if (!all(required %in% names(measure_tbl))) {
-    stop("Missing required columns.", call. = FALSE)
+    stop("Missing required columns: value, cluster, sex_gender.", call. = FALSE)
   }
 
-  # remove indeterminate sex if desired
+  # Keep only binary sex categories for the interaction test.
   df <- measure_tbl %>%
-    dplyr::filter(sex_gender %in% c("f", "m"))
+    dplyr::filter(.data$sex_gender %in% c("f", "m")) %>%
+    dplyr::mutate(
+      cluster = as.character(.data$cluster),
+      sex_gender = as.character(.data$sex_gender)
+    )
 
-  # compute observed effect
-  means <- df %>%
-    dplyr::group_by(sex_gender, cluster) %>%
-    dplyr::summarise(mean_val = mean(value, na.rm = TRUE), .groups = "drop")
+  cluster_levels <- sort(unique(df$cluster))
+  if (length(cluster_levels) != 2L) {
+    stop(
+      "test_sex_cluster_interaction() requires exactly two cluster levels after filtering.",
+      call. = FALSE
+    )
+  }
 
-  delta <- means %>%
-    tidyr::pivot_wider(names_from = cluster, values_from = mean_val) %>%
-    dplyr::mutate(diff = .data[[2]] - .data[[1]])
+  # Helper: compute cluster difference within each sex, then compare those
+  # differences between male and female groups.
+  compute_effect <- function(dat) {
+    delta <- dat %>%
+      dplyr::group_by(.data$sex_gender, .data$cluster) %>%
+      dplyr::summarise(
+        mean_val = mean(.data$value, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      tidyr::pivot_wider(
+        names_from = "cluster",
+        values_from = "mean_val"
+      )
 
-  obs_effect <- diff(delta$diff)
+    needed <- c("sex_gender", cluster_levels)
+    if (!all(needed %in% names(delta))) {
+      return(NA_real_)
+    }
 
-  # permutation test
+    delta <- delta %>%
+      dplyr::mutate(
+        cluster_diff = .data[[cluster_levels[2]]] - .data[[cluster_levels[1]]]
+      )
+
+    f_diff <- delta$cluster_diff[match("f", delta$sex_gender)]
+    m_diff <- delta$cluster_diff[match("m", delta$sex_gender)]
+
+    if (!is.finite(f_diff) || !is.finite(m_diff)) {
+      return(NA_real_)
+    }
+
+    # Difference-in-differences:
+    # (cluster2 - cluster1 among males) - (cluster2 - cluster1 among females)
+    m_diff - f_diff
+  }
+
+  observed_effect <- compute_effect(df)
+
   set.seed(seed)
 
   perm_effects <- replicate(n_perm, {
     df_perm <- df %>%
-      dplyr::mutate(cluster = sample(cluster))
+      dplyr::mutate(cluster = sample(.data$cluster))
 
-    means_p <- df_perm %>%
-      dplyr::group_by(sex_gender, cluster) %>%
-      dplyr::summarise(mean_val = mean(value, na.rm = TRUE), .groups = "drop")
-
-    delta_p <- means_p %>%
-      tidyr::pivot_wider(names_from = cluster, values_from = mean_val) %>%
-      dplyr::mutate(diff = .data[[2]] - .data[[1]])
-
-    diff(delta_p$diff)
+    compute_effect(df_perm)
   })
 
-  p_val <- mean(abs(perm_effects) >= abs(obs_effect))
+  p_val <- mean(abs(perm_effects) >= abs(observed_effect), na.rm = TRUE)
+
+  means <- df %>%
+    dplyr::group_by(.data$sex_gender, .data$cluster) %>%
+    dplyr::summarise(
+      mean_val = mean(.data$value, na.rm = TRUE),
+      .groups = "drop"
+    )
 
   list(
-    observed_effect = obs_effect,
+    observed_effect = observed_effect,
     p_value = p_val,
     perm_distribution = perm_effects,
-    summary = means
+    summary = means,
+    cluster_levels = cluster_levels
   )
 }
 
@@ -2909,6 +2947,7 @@ run_life_table_cluster_comparison_by_sex <- function(life_tables_windows_by_sex,
     dplyr::mutate(
       p_adj = stats::p.adjust(.data$p_value, method = "BH")
     )
+
 
   interaction <- test_sex_cluster_interaction(
     measure_tbl,
