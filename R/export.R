@@ -1,6 +1,6 @@
 # export.R
 #
-# Export helpers for the merged occupancy package.
+# Export helpers for OccuPast.
 #
 # Design:
 # - flexible: accepts any mix of prepared / allocation / analysis / ensemble / final / significance objects
@@ -242,9 +242,9 @@ export_results_csv <- function(out_dir,
 
   # analysis
   analysis_tables <- list(
-    site_bucket = .extract_tbl_export(analysis, c("data", "site_bucket")),
-    bucket_curve = .extract_tbl_export(analysis, c("data", "bucket_curve")),
-    region_bucket = .extract_tbl_export(analysis, c("data", "region_bucket"))
+    site_bin = .extract_tbl_export(analysis, c("data", "site_bin")),
+    bin_curve = .extract_tbl_export(analysis, c("data", "bin_curve")),
+    region_bin = .extract_tbl_export(analysis, c("data", "region_bin"))
   )
 
   for (nm in names(analysis_tables)) {
@@ -289,7 +289,7 @@ export_results_csv <- function(out_dir,
   # fallback / uncertainty diagnostic
   if (!is.null(final)) {
     diag_fallback <- try(
-      flag_uncertain_fallback_buckets(
+      flag_uncertain_fallback_bins(
         final = final,
         provenance_source = final,
         fallback_threshold = 0.25,
@@ -474,7 +474,7 @@ export_significance_csv <- function(out_dir,
 #' @param final Optional finalized ensemble object.
 #' @param significance Optional significance object or list.
 #' @param do_spatial Whether to export spatial plots.
-#' @param spatial_buckets Optional vector of buckets for spatial slices.
+#' @param spatial_bins Optional vector of bins for spatial slices.
 #' @param spatial_bbox Optional bbox c(xmin, xmax, ymin, ymax).
 #' @param region_col Region column name.
 #'
@@ -486,9 +486,13 @@ export_plot_bundle <- function(out_dir,
                                ens = NULL,
                                significance = NULL,
                                do_spatial = TRUE,
-                               spatial_buckets = NULL,
+                               spatial_bins = NULL,
                                spatial_bbox = NULL,
-                               region_col = "site_region") {
+                               region_col = "site_region",
+                               spatial_buckets = NULL) {
+  if (is.null(spatial_bins) && !is.null(spatial_buckets)) {
+    spatial_bins <- spatial_buckets
+  }
   plots_dir <- file.path(out_dir, "plots")
   .dir_create_safe(plots_dir)
 
@@ -568,7 +572,7 @@ export_plot_bundle <- function(out_dir,
   if (!is.null(regional_source)) {
     try({
       plot_regional_curves(
-        region_bucket = regional_source,
+        region_bin = regional_source,
         region_col = region_col,
         facet = TRUE,
         save_path = file.path(plots_dir, "regional_curves_faceted.png")
@@ -582,7 +586,7 @@ export_plot_bundle <- function(out_dir,
 
     try({
       plot_regional_curves(
-        region_bucket = regional_source,
+        region_bin = regional_source,
         region_col = region_col,
         facet = FALSE,
         save_dir = file.path(plots_dir, "regions")
@@ -609,7 +613,7 @@ export_plot_bundle <- function(out_dir,
   # Prefer final so contributions are averaged across replicates
   # -----------------------------------------------------------------------
   provenance_source <- NULL
-  if (!is.null(final) && !is.null(final$replicate_data) && !is.null(final$replicate_data$site_bucket)) {
+  if (!is.null(final) && !is.null(final$replicate_data) && !is.null(final$replicate_data$site_bin)) {
     provenance_source <- final
   } else if (!is.null(ens) && !is.null(ens$replicate_results)) {
     provenance_source <- ens
@@ -620,7 +624,7 @@ export_plot_bundle <- function(out_dir,
   if (!is.null(provenance_source)) {
     try({
       plot_provenance_contributions(
-        site_bucket = provenance_source,
+        site_bin = provenance_source,
         normalized = TRUE,
         save_path = file.path(plots_dir, "provenance_contributions.png")
       )
@@ -633,7 +637,7 @@ export_plot_bundle <- function(out_dir,
   } else {
     log_tbl <- .record_export(
       log_tbl, "plots", "provenance_contributions",
-      NA, "skipped", "neither final replicate site_bucket, ensemble, nor analysis available"
+      NA, "skipped", "neither final replicate site_bin, ensemble, nor analysis available"
     )
   }
 
@@ -642,7 +646,7 @@ export_plot_bundle <- function(out_dir,
   # -----------------------------------------------------------------------
   if (!is.null(final)) {
     try({
-      diag_fallback <- flag_uncertain_fallback_buckets(
+      diag_fallback <- flag_uncertain_fallback_bins(
         final = final,
         provenance_source = final,
         fallback_threshold = 0.25,
@@ -673,7 +677,7 @@ export_plot_bundle <- function(out_dir,
   # Prefer final, then ens, then analysis
   # -----------------------------------------------------------------------
   spatial_source <- NULL
-  if (!is.null(final) && !is.null(final$replicate_data) && !is.null(final$replicate_data$site_bucket)) {
+  if (!is.null(final) && !is.null(final$replicate_data) && !is.null(final$replicate_data$site_bin)) {
     spatial_source <- final
   } else if (!is.null(ens) && !is.null(ens$replicate_results)) {
     spatial_source <- ens
@@ -681,11 +685,11 @@ export_plot_bundle <- function(out_dir,
     spatial_source <- analysis
   }
 
-  if (isTRUE(do_spatial) && !is.null(spatial_source) && !is.null(spatial_buckets)) {
+  if (isTRUE(do_spatial) && !is.null(spatial_source) && !is.null(spatial_bins)) {
     try({
       plot_spatial_slices(
-        site_bucket = spatial_source,
-        selected_buckets = spatial_buckets,
+        site_bin = spatial_source,
+        selected_bins = spatial_bins,
         bbox = spatial_bbox,
         facet = TRUE,
         save_path = file.path(plots_dir, "spatial_slices_faceted.png")
@@ -699,14 +703,14 @@ export_plot_bundle <- function(out_dir,
 
     try({
       plot_spatial_slices(
-        site_bucket = spatial_source,
-        selected_buckets = spatial_buckets,
+        site_bin = spatial_source,
+        selected_bins = spatial_bins,
         bbox = spatial_bbox,
         facet = FALSE,
         save_dir = file.path(plots_dir, "spatial")
       )
       log_tbl <- .record_export(
-        log_tbl, "plots", "spatial_slices_by_bucket",
+        log_tbl, "plots", "spatial_slices_by_bin",
         file.path(plots_dir, "spatial"),
         "written"
       )
@@ -715,7 +719,7 @@ export_plot_bundle <- function(out_dir,
     try({
       anim_path <- file.path(plots_dir, "spatial_density.gif")
       animate_spatial_density(
-        site_bucket = spatial_source,
+        site_bin = spatial_source,
         bbox = spatial_bbox,
         save_path = anim_path
       )
@@ -728,15 +732,15 @@ export_plot_bundle <- function(out_dir,
   } else {
     log_tbl <- .record_export(
       log_tbl, "plots", "spatial_slices_faceted",
-      NA, "skipped", "spatial source or spatial_buckets not available"
+      NA, "skipped", "spatial source or spatial_bins not available"
     )
     log_tbl <- .record_export(
-      log_tbl, "plots", "spatial_slices_by_bucket",
-      NA, "skipped", "spatial source or spatial_buckets not available"
+      log_tbl, "plots", "spatial_slices_by_bin",
+      NA, "skipped", "spatial source or spatial_bins not available"
     )
     log_tbl <- .record_export(
       log_tbl, "plots", "spatial_density_animation",
-      NA, "skipped", "spatial source or spatial_buckets not available"
+      NA, "skipped", "spatial source or spatial_bins not available"
     )
   }
 
@@ -759,7 +763,7 @@ export_plot_bundle <- function(out_dir,
 #' @param significance Optional significance result object or named list.
 #' @param export_plots Whether to export plots.
 #' @param do_spatial Whether to export spatial plots.
-#' @param spatial_buckets Optional vector of buckets for spatial slices.
+#' @param spatial_bins Optional vector of bins for spatial slices.
 #' @param spatial_bbox Optional bbox c(xmin, xmax, ymin, ymax).
 #' @param region_col Region column name.
 #'
@@ -774,9 +778,13 @@ export_run_bundle <- function(out_dir,
                               significance = NULL,
                               export_plots = TRUE,
                               do_spatial = TRUE,
-                              spatial_buckets = NULL,
+                              spatial_bins = NULL,
                               spatial_bbox = NULL,
-                              region_col = "site_region") {
+                              region_col = "site_region",
+                              spatial_buckets = NULL) {
+  if (is.null(spatial_bins) && !is.null(spatial_buckets)) {
+    spatial_bins <- spatial_buckets
+  }
   run_dir <- file.path(out_dir, run_name)
   .dir_create_safe(run_dir)
   .dir_create_safe(file.path(run_dir, "tables"))
@@ -848,7 +856,7 @@ export_run_bundle <- function(out_dir,
         ens = ens,
         significance = significance,
         do_spatial = do_spatial,
-        spatial_buckets = spatial_buckets,
+        spatial_bins = spatial_bins,
         spatial_bbox = spatial_bbox,
         region_col = region_col
       )
