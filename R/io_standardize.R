@@ -1,10 +1,7 @@
 # io_standardize.R
 #
-# Shared ingest / standardization helpers for the merged occupancy package.
+# Shared ingest / standardization helpers for OccuPast.
 #
-# This file is intended to provide reusable low-level helpers only.
-# Domain-specific preparation functions such as build_chronology_table()
-# should live in prepare_data.R.
 #
 # Public helpers exposed for reuse:
 #   - rename_columns_flex()
@@ -18,6 +15,7 @@
 #   - .as_character_na_safe()
 #   - .null_if_empty_string()
 #   - .add_missing_columns()
+#   - .standardize_bin_columns()
 
 # Suggested imports in DESCRIPTION:
 # Imports:
@@ -81,6 +79,41 @@
   data
 }
 
+# Standardize temporal-bin column names while keeping legacy inputs readable.
+# Bins used to be called buckets. Now, they aren't anymore.
+.standardize_bin_columns <- function(data, arg = "data") {
+  .require_data_frame(data, arg)
+  data <- tibble::as_tibble(data)
+
+  legacy_map <- c(
+    horizon_bucket = "horizon_bin",
+    bucket_start = "bin_start",
+    bucket_end = "bin_end",
+    chosen_bucket = "chosen_bin"
+  )
+
+  for (old in names(legacy_map)) {
+    new <- unname(legacy_map[[old]])
+    has_old <- old %in% names(data)
+    has_new <- new %in% names(data)
+
+    if (has_old && has_new) {
+      rlang::abort(
+        paste0(
+          "`", arg, "` contains both legacy column `", old,
+          "` and canonical column `", new, "`. Please keep only one."
+        )
+      )
+    }
+
+    if (has_old && !has_new) {
+      names(data)[names(data) == old] <- new
+    }
+  }
+
+  data
+}
+
 .standard_exclusion_log <- function() {
   tibble::tibble(
     stage = character(),
@@ -104,6 +137,7 @@
 
 # -------------------------------------------------------------------------
 # Exclusion log helpers
+# The exclusion log documents dropped entries for troubleshooting
 # -------------------------------------------------------------------------
 
 #' Initialize an exclusion log
