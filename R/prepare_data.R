@@ -1,16 +1,6 @@
 # prepare_data.R
 #
-# Domain-level data preparation functions for the merged occupancy package.
-#
-# Assumes shared ingest helpers already exist in io_standardize.R:
-#   - rename_columns_flex()
-#   - coerce_numeric_fields()
-#   - log_exclusions_init()
-#   - log_exclusions_add()
-#   - .require_data_frame()
-#   - .require_named_character()
-#   - .null_if_empty_string()
-#   - .add_missing_columns()
+# Domain-level data preparation functions for OccuPast.
 #
 # Core design:
 # - chronology is a strict phase-system table
@@ -139,6 +129,8 @@ build_chronology_table <- function(data, colmap, drop_invalid = TRUE) {
     }
   }
 
+  # If no explicit phase_id is supplied, derive a stable join key from
+  # system_name and phase_name. Chronological joins downstream depend on this.
   need_phase_id <- is.na(dat$phase_id) | dat$phase_id == ""
   if (any(need_phase_id)) {
     dat$phase_id[need_phase_id] <- ifelse(
@@ -148,6 +140,8 @@ build_chronology_table <- function(data, colmap, drop_invalid = TRUE) {
     )
   }
 
+  # Coerce chronology bounds with an audit trail; invalid dates are logged
+  # rather than silently discarded.
   coe <- coerce_numeric_fields(
     dat,
     fields = c("horizon_start", "horizon_end", "fade_in_start", "fade_out_end"),
@@ -155,6 +149,8 @@ build_chronology_table <- function(data, colmap, drop_invalid = TRUE) {
   )
   dat <- coe$data
 
+  # Missing fade bounds collapse to the core horizon, giving a rectangular
+  # profile instead of dropping otherwise usable phases.
   dat$fade_in_start[is.na(dat$fade_in_start) & !is.na(dat$horizon_start)] <-
     dat$horizon_start[is.na(dat$fade_in_start) & !is.na(dat$horizon_start)]
 
@@ -310,6 +306,8 @@ prepare_mortuary_individual <- function(data, colmap) {
   dat <- coe$data
   coercion_log <- coe$log
 
+  # record_id is an ingest key only. Fill missing IDs deterministically so
+  # combined burial-level tables can later receive stable UIDs.
   if (all(is.na(dat$record_id))) {
     dat$record_id <- seq_len(nrow(dat))
   } else {
@@ -453,6 +451,8 @@ prepare_mortuary_aggregated <- function(data, colmap,
   }
 
   if (generate_record_id) {
+    # Aggregated rows may not have record IDs; deterministic IDs make later
+    # unwrapping reproducible.
     need_id <- is.na(dat$record_id) | dat$record_id == ""
     if (any(need_id)) {
       dat$record_id[need_id] <- seq_len(sum(need_id))
@@ -766,6 +766,8 @@ unwrap_mortuary_aggregated <- function(aggregated) {
     ))
   }
 
+  # Unwrapping converts count rows into pseudo-burial rows. The unwrap_index
+  # preserves which pseudo-records came from the same aggregate input row.
   expanded_list <- vector("list", nrow(agg_data))
 
   for (i in seq_len(nrow(agg_data))) {
@@ -952,9 +954,9 @@ assemble_prepared_inputs <- function(chronology,
 
   mort_tbl <- tibble::as_tibble(mort_data)
 
-  # Deterministic ordering before UID assignment:
-  # input_type, record_id, unwrap_index
-  # For individual rows unwrap_index is NA; replace with 0 for stable sorting.
+  # Deterministic ordering before UID assignment. UIDs are analysis keys, so
+  # they must not depend on the original row order of input files. For
+  # individual rows unwrap_index is NA; replace with 0 for stable sorting.
   sort_unwrap <- ifelse(is.na(mort_tbl$unwrap_index), 0L, as.integer(mort_tbl$unwrap_index))
 
   ord <- order(
