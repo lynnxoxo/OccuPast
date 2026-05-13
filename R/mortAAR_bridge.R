@@ -2227,7 +2227,7 @@ compute_age_class_cluster_tests <- function(measure_tbl,
     dplyr::group_by(.data$age, .data$age_start, .data$age_end) %>%
     dplyr::summarise(
       p_value = tryCatch(
-        stats::wilcox.test(value ~ cluster, data = dplyr::cur_data(), exact = FALSE)$p.value,
+        stats::wilcox.test(value ~ cluster, data = dplyr::pick(dplyr::everything()), exact = FALSE)$p.value,
         error = function(e) NA_real_
       ),
       .groups = "drop"
@@ -2306,7 +2306,7 @@ plot_cluster_measure_difference_by_age <- function(measure_tbl,
   diff_tbl <- measure_tbl %>%
     dplyr::group_by(.data$age, .data$age_start, .data$cluster) %>%
     dplyr::summarise(mean_val = mean(.data$value, na.rm = TRUE), .groups = "drop") %>%
-    tidyr::pivot_wider(names_from = .data$cluster, values_from = .data$mean_val) %>%
+    tidyr::pivot_wider(names_from = "cluster", values_from = "mean_val") %>%
     dplyr::mutate(diff = .data[[cluster_levels[2]]] - .data[[cluster_levels[1]]]) %>%
     dplyr::arrange(.data$age_start)
 
@@ -2901,7 +2901,7 @@ run_life_table_cluster_comparison_by_sex <- function(life_tables_windows_by_sex,
     dplyr::group_by(.data$age, .data$cluster) %>%
     dplyr::summarise(
       p_value = tryCatch(
-        stats::wilcox.test(value ~ sex_gender, data = dplyr::cur_data(), exact = FALSE)$p.value,
+        stats::wilcox.test(value ~ sex_gender, data = dplyr::pick(dplyr::everything()), exact = FALSE)$p.value,
         error = function(e) NA_real_
       ),
       .groups = "drop"
