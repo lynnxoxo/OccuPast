@@ -1,6 +1,6 @@
 # ensemble.R
 #
-# Ensemble orchestration for the merged occupancy package.
+# Ensemble orchestration for OccuPast.
 #
 # This file coordinates:
 # - temporal replicate generation
@@ -26,12 +26,14 @@
 #   dplyr,
 #   tibble,
 #   rlang,
-#   parallel
+#   parallel,
+#   magrittr
 #
 # Suggested namespace usage:
 #   @importFrom dplyr bind_rows left_join
 #   @importFrom tibble tibble as_tibble
 #   @importFrom rlang abort
+#   @importFrom magrittr %>%
 
 # -------------------------------------------------------------------------
 # Internal helpers
@@ -73,31 +75,34 @@
 # Canonical regridding helpers
 # -------------------------------------------------------------------------
 
-#' Build a canonical bucket grid from replicate estimates
+#' Build a canonical bin grid from replicate estimates
 #'
 #' @param replicate_estimates Combined replicate estimates table.
-#' @param bucket_width Canonical bucket width.
+#' @param bin_width Canonical bin width.
 #' @param canonical_offset Offset for the canonical grid.
 #'
-#' @return Tibble with horizon_bucket, bucket_start, bucket_end.
+#' @return Tibble with horizon_bin, bin_start, bin_end.
 make_canonical_grid_from_replicates <- function(replicate_estimates,
-                                                bucket_width,
+                                                bin_width,
                                                 canonical_offset = 0) {
   replicate_estimates <- tibble::as_tibble(replicate_estimates)
+  if (exists(".standardize_bin_columns", mode = "function")) {
+    replicate_estimates <- .standardize_bin_columns(replicate_estimates, arg = "replicate_estimates")
+  }
 
   validate_required_fields(
     replicate_estimates,
-    c("bucket_start", "bucket_end"),
+    c("bin_start", "bin_end"),
     "replicate_estimates"
   )
 
-  year_min <- min(replicate_estimates$bucket_start, na.rm = TRUE)
-  year_max <- max(replicate_estimates$bucket_end, na.rm = TRUE)
+  year_min <- min(replicate_estimates$bin_start, na.rm = TRUE)
+  year_max <- max(replicate_estimates$bin_end, na.rm = TRUE)
 
-  make_bucket_grid(
+  make_bin_grid(
     year_min = year_min,
     year_max = year_max,
-    bucket_width = bucket_width,
+    bin_width = bin_width,
     offset = canonical_offset
   )
 }
@@ -105,32 +110,36 @@ make_canonical_grid_from_replicates <- function(replicate_estimates,
 #' Regrid one replicate estimate table onto a canonical grid by interval overlap
 #'
 #' @param replicate_tbl One replicate estimate table with:
-#'   replicate_id, horizon_bucket, bucket_start, bucket_end, estimate, var_hat, se
-#' @param canonical_grid Canonical grid from make_bucket_grid().
+#'   replicate_id, horizon_bin, bin_start, bin_end, estimate, var_hat, se
+#' @param canonical_grid Canonical grid from make_bin_grid().
 #'
 #' @return Tibble on the canonical grid for that replicate.
 regrid_replicate_estimates <- function(replicate_tbl, canonical_grid) {
   replicate_tbl <- tibble::as_tibble(replicate_tbl)
   canonical_grid <- tibble::as_tibble(canonical_grid)
+  if (exists(".standardize_bin_columns", mode = "function")) {
+    replicate_tbl <- .standardize_bin_columns(replicate_tbl, arg = "replicate_tbl")
+    canonical_grid <- .standardize_bin_columns(canonical_grid, arg = "canonical_grid")
+  }
 
   validate_required_fields(
     replicate_tbl,
-    c("replicate_id", "bucket_start", "bucket_end", "estimate", "var_hat"),
+    c("replicate_id", "bin_start", "bin_end", "estimate", "var_hat"),
     "replicate_tbl"
   )
 
   validate_required_fields(
     canonical_grid,
-    c("horizon_bucket", "bucket_start", "bucket_end"),
+    c("horizon_bin", "bin_start", "bin_end"),
     "canonical_grid"
   )
 
   if (nrow(replicate_tbl) == 0 || nrow(canonical_grid) == 0) {
     return(tibble::tibble(
       replicate_id = numeric(),
-      horizon_bucket = numeric(),
-      bucket_start = numeric(),
-      bucket_end = numeric(),
+      horizon_bin = numeric(),
+      bin_start = numeric(),
+      bin_end = numeric(),
       estimate = numeric(),
       var_hat = numeric(),
       se = numeric()
@@ -145,22 +154,22 @@ regrid_replicate_estimates <- function(replicate_tbl, canonical_grid) {
   out_parts <- vector("list", nrow(canonical_grid))
 
   for (j in seq_len(nrow(canonical_grid))) {
-    c_start <- canonical_grid$bucket_start[j]
-    c_end   <- canonical_grid$bucket_end[j]
+    c_start <- canonical_grid$bin_start[j]
+    c_end   <- canonical_grid$bin_end[j]
     c_width <- c_end - c_start
 
     overlaps <- pmax(
       0,
-      pmin(replicate_tbl$bucket_end, c_end) - pmax(replicate_tbl$bucket_start, c_start)
+      pmin(replicate_tbl$bin_end, c_end) - pmax(replicate_tbl$bin_start, c_start)
     )
 
     keep <- overlaps > 0
     if (!any(keep)) {
       out_parts[[j]] <- tibble::tibble(
         replicate_id = rep_id,
-        horizon_bucket = canonical_grid$horizon_bucket[j],
-        bucket_start = c_start,
-        bucket_end = c_end,
+        horizon_bin = canonical_grid$horizon_bin[j],
+        bin_start = c_start,
+        bin_end = c_end,
         estimate = 0,
         var_hat = 0,
         se = 0
@@ -168,8 +177,10 @@ regrid_replicate_estimates <- function(replicate_tbl, canonical_grid) {
       next
     }
 
+    # Regridding preserves mass by interval overlap: contribution = estimate * overlap / original_width.
+    # Variance is scaled by the squared fraction, following Var(aX) = a^2 Var(X).
     # Fraction of each replicate interval contributing to this canonical interval
-    rep_widths <- replicate_tbl$bucket_end[keep] - replicate_tbl$bucket_start[keep]
+    rep_widths <- replicate_tbl$bin_end[keep] - replicate_tbl$bin_start[keep]
     frac <- overlaps[keep] / rep_widths
 
     # Redistribute estimate by overlap fraction
@@ -180,9 +191,9 @@ regrid_replicate_estimates <- function(replicate_tbl, canonical_grid) {
 
     out_parts[[j]] <- tibble::tibble(
       replicate_id = rep_id,
-      horizon_bucket = canonical_grid$horizon_bucket[j],
-      bucket_start = c_start,
-      bucket_end = c_end,
+      horizon_bin = canonical_grid$horizon_bin[j],
+      bin_start = c_start,
+      bin_end = c_end,
       estimate = est_j,
       var_hat = var_j,
       se = sqrt(var_j)
@@ -195,23 +206,27 @@ regrid_replicate_estimates <- function(replicate_tbl, canonical_grid) {
 #' Regrid one regional replicate estimate table onto a canonical grid by interval overlap
 #'
 #' @param region_replicate_tbl One replicate regional estimate table with:
-#'   replicate_id, site_region, horizon_bucket, bucket_start, bucket_end, estimate, var_hat, se
-#' @param canonical_grid Canonical grid from make_bucket_grid().
+#'   replicate_id, site_region, horizon_bin, bin_start, bin_end, estimate, var_hat, se
+#' @param canonical_grid Canonical grid from make_bin_grid().
 #'
 #' @return Tibble on the canonical grid for that replicate and all regions.
 regrid_region_replicate_estimates <- function(region_replicate_tbl, canonical_grid) {
   region_replicate_tbl <- tibble::as_tibble(region_replicate_tbl)
   canonical_grid <- tibble::as_tibble(canonical_grid)
+  if (exists(".standardize_bin_columns", mode = "function")) {
+    region_replicate_tbl <- .standardize_bin_columns(region_replicate_tbl, arg = "region_replicate_tbl")
+    canonical_grid <- .standardize_bin_columns(canonical_grid, arg = "canonical_grid")
+  }
 
   validate_required_fields(
     region_replicate_tbl,
-    c("replicate_id", "site_region", "bucket_start", "bucket_end", "estimate", "var_hat"),
+    c("replicate_id", "site_region", "bin_start", "bin_end", "estimate", "var_hat"),
     "region_replicate_tbl"
   )
 
   validate_required_fields(
     canonical_grid,
-    c("horizon_bucket", "bucket_start", "bucket_end"),
+    c("horizon_bin", "bin_start", "bin_end"),
     "canonical_grid"
   )
 
@@ -219,9 +234,9 @@ regrid_region_replicate_estimates <- function(region_replicate_tbl, canonical_gr
     return(tibble::tibble(
       replicate_id = numeric(),
       site_region = character(),
-      horizon_bucket = numeric(),
-      bucket_start = numeric(),
-      bucket_end = numeric(),
+      horizon_bin = numeric(),
+      bin_start = numeric(),
+      bin_end = numeric(),
       estimate = numeric(),
       var_hat = numeric(),
       se = numeric()
@@ -245,12 +260,12 @@ regrid_region_replicate_estimates <- function(region_replicate_tbl, canonical_gr
     out_parts <- vector("list", nrow(canonical_grid))
 
     for (j in seq_len(nrow(canonical_grid))) {
-      c_start <- canonical_grid$bucket_start[j]
-      c_end   <- canonical_grid$bucket_end[j]
+      c_start <- canonical_grid$bin_start[j]
+      c_end   <- canonical_grid$bin_end[j]
 
       overlaps <- pmax(
         0,
-        pmin(reg_tbl$bucket_end, c_end) - pmax(reg_tbl$bucket_start, c_start)
+        pmin(reg_tbl$bin_end, c_end) - pmax(reg_tbl$bin_start, c_start)
       )
 
       keep <- overlaps > 0
@@ -258,9 +273,9 @@ regrid_region_replicate_estimates <- function(region_replicate_tbl, canonical_gr
         out_parts[[j]] <- tibble::tibble(
           replicate_id = rep_id,
           site_region = reg,
-          horizon_bucket = canonical_grid$horizon_bucket[j],
-          bucket_start = c_start,
-          bucket_end = c_end,
+          horizon_bin = canonical_grid$horizon_bin[j],
+          bin_start = c_start,
+          bin_end = c_end,
           estimate = 0,
           var_hat = 0,
           se = 0
@@ -268,7 +283,8 @@ regrid_region_replicate_estimates <- function(region_replicate_tbl, canonical_gr
         next
       }
 
-      rep_widths <- reg_tbl$bucket_end[keep] - reg_tbl$bucket_start[keep]
+      # Same overlap-based regridding as the global curve, applied within region.
+      rep_widths <- reg_tbl$bin_end[keep] - reg_tbl$bin_start[keep]
       frac <- overlaps[keep] / rep_widths
 
       est_j <- sum(reg_tbl$estimate[keep] * frac, na.rm = TRUE)
@@ -277,9 +293,9 @@ regrid_region_replicate_estimates <- function(region_replicate_tbl, canonical_gr
       out_parts[[j]] <- tibble::tibble(
         replicate_id = rep_id,
         site_region = reg,
-        horizon_bucket = canonical_grid$horizon_bucket[j],
-        bucket_start = c_start,
-        bucket_end = c_end,
+        horizon_bin = canonical_grid$horizon_bin[j],
+        bin_start = c_start,
+        bin_end = c_end,
         estimate = est_j,
         var_hat = var_j,
         se = sqrt(var_j)
@@ -299,23 +315,23 @@ regrid_region_replicate_estimates <- function(region_replicate_tbl, canonical_gr
 #' Generate temporal offsets for replicate runs
 #'
 #' @param M Number of replicates.
-#' @param bucket_width Bucket width.
+#' @param bin_width Bin width.
 #' @param mode One of "cycle", "random", "fixed".
 #' @param fixed_offset Used when `mode = "fixed"`.
 #' @param seed Optional seed.
 #'
 #' @return Numeric vector of length M.
 generate_temporal_offsets <- function(M,
-                                      bucket_width,
+                                      bin_width,
                                       mode = c("cycle", "random", "fixed"),
                                       fixed_offset = 0,
                                       seed = NULL) {
   mode <- match.arg(mode)
   .assert_replicate_count(M)
 
-  if (!is.numeric(bucket_width) || length(bucket_width) != 1L ||
-      is.na(bucket_width) || bucket_width <= 0) {
-    rlang::abort("`bucket_width` must be a single positive number.")
+  if (!is.numeric(bin_width) || length(bin_width) != 1L ||
+      is.na(bin_width) || bin_width <= 0) {
+    rlang::abort("`bin_width` must be a single positive number.")
   }
 
   if (mode == "fixed") {
@@ -323,14 +339,15 @@ generate_temporal_offsets <- function(M,
   }
 
   if (mode == "cycle") {
-    # Cycle offsets within one bucket width.
+    # Offset cycling tests whether the curve depends on arbitrary bin alignment.
+    # Offsets are a nuisance discretisation choice, not an archaeological claim.
     if (M == 1L) return(0)
-    return(seq(0, bucket_width - 1, length.out = M))
+    return(seq(0, bin_width - 1, length.out = M))
   }
 
   # random
   if (!is.null(seed)) set.seed(seed)
-  stats::runif(M, min = 0, max = bucket_width)
+  stats::runif(M, min = 0, max = bin_width)
 }
 
 # -------------------------------------------------------------------------
@@ -344,13 +361,13 @@ generate_temporal_offsets <- function(M,
 #' chronology allocation, curve analysis, and within-replicate uncertainty.
 #'
 #' The default temporal allocation mode is \code{"stochastic"}, so each burial is
-#' assigned to one time bucket by random draw from its phase-level trapezoidal
+#' assigned to one time bin by random draw from its phase-level trapezoidal
 #' profile. This makes each replicate a plausible temporal realization and gives
 #' meaningful between-replicate variance when multiple replicates are pooled.
 #'
 #' @param prepared_inputs Output from \code{assemble_prepared_inputs()}.
 #' @param replicate_id Integer replicate ID.
-#' @param bucket_width Bucket width.
+#' @param bin_width Bin width.
 #' @param offset Temporal offset for this replicate.
 #' @param allocation_mode One of \code{"stochastic"}, \code{"fractional"}, or
 #'   \code{"deterministic_max"}. Default is \code{"stochastic"}.
@@ -367,7 +384,7 @@ generate_temporal_offsets <- function(M,
 #' @return Structured list for one replicate.
 run_one_replicate <- function(prepared_inputs,
                               replicate_id,
-                              bucket_width = 25,
+                              bin_width = 25,
                               offset = 0,
                               allocation_mode = c("stochastic", "fractional", "deterministic_max"),
                               profile = c("trapezoid", "uniform"),
@@ -392,7 +409,7 @@ run_one_replicate <- function(prepared_inputs,
 
   alloc <- harmonize_chronologies_merged(
     prepared_inputs = prepared_inputs,
-    bucket_width = bucket_width,
+    bin_width = bin_width,
     offset = offset,
     allocation_mode = allocation_mode,
     profile = profile,
@@ -407,62 +424,62 @@ run_one_replicate <- function(prepared_inputs,
     normalization = normalization
   )
 
-  site_bucket <- analysis$data$site_bucket
+  site_bin <- analysis$data$site_bin
   value_col <- analysis$settings$value_col
 
   if (variance_method == "site_bootstrap") {
     var_res <- within_variance_site_bootstrap(
-      site_bucket = site_bucket,
+      site_bin = site_bin,
       value_col = value_col,
       B = bootstrap_B,
       seed = seed
     )
   } else {
     var_res <- within_variance_site_jackknife(
-      site_bucket = site_bucket,
+      site_bin = site_bin,
       value_col = value_col
     )
   }
 
-  rep_curve <- analysis$data$bucket_curve |>
-    dplyr::select(horizon_bucket, bucket_start, bucket_end, mean_value) |>
+  rep_curve <- analysis$data$bin_curve %>%
+    dplyr::select(horizon_bin, bin_start, bin_end, mean_value) %>%
     dplyr::rename(estimate = mean_value)
 
   rep_est <- dplyr::left_join(
     rep_curve,
-    var_res$data[, c("horizon_bucket", "bucket_start", "bucket_end", "var_hat", "se"), drop = FALSE],
-    by = c("horizon_bucket", "bucket_start", "bucket_end")
+    var_res$data[, c("horizon_bin", "bin_start", "bin_end", "var_hat", "se"), drop = FALSE],
+    by = c("horizon_bin", "bin_start", "bin_end")
   )
 
   rep_est$replicate_id <- replicate_id
-  rep_est <- rep_est[, c("replicate_id", "horizon_bucket", "bucket_start", "bucket_end", "estimate", "var_hat", "se")]
+  rep_est <- rep_est[, c("replicate_id", "horizon_bin", "bin_start", "bin_end", "estimate", "var_hat", "se")]
 
   rep_region_est <- NULL
-  if (!is.null(analysis$data$region_bucket)) {
-    reg_tbl <- analysis$data$region_bucket
+  if (!is.null(analysis$data$region_bin)) {
+    reg_tbl <- analysis$data$region_bin
 
     if ("site_region" %in% names(reg_tbl) && "mean_value" %in% names(reg_tbl)) {
-      reg_curve <- reg_tbl |>
-        dplyr::select(site_region, horizon_bucket, bucket_start, bucket_end, mean_value) |>
+      reg_curve <- reg_tbl %>%
+        dplyr::select(site_region, horizon_bin, bin_start, bin_end, mean_value) %>%
         dplyr::rename(estimate = mean_value)
 
-      # Approximate within-replicate regional variance using site-bucket subsets per region
-      site_bucket_tbl <- analysis$data$site_bucket
+      # Approximate within-replicate regional variance using site-bin subsets per region
+      site_bin_tbl <- analysis$data$site_bin
       reg_var_parts <- lapply(unique(reg_curve$site_region), function(reg) {
-        sb_reg <- site_bucket_tbl[!is.na(site_bucket_tbl$site_region) & site_bucket_tbl$site_region == reg, , drop = FALSE]
+        sb_reg <- site_bin_tbl[!is.na(site_bin_tbl$site_region) & site_bin_tbl$site_region == reg, , drop = FALSE]
 
         if (nrow(sb_reg) == 0) return(NULL)
 
         if (variance_method == "site_bootstrap") {
           vr <- within_variance_site_bootstrap(
-            site_bucket = sb_reg,
+            site_bin = sb_reg,
             value_col = value_col,
             B = bootstrap_B,
             seed = seed
           )
         } else {
           vr <- within_variance_site_jackknife(
-            site_bucket = sb_reg,
+            site_bin = sb_reg,
             value_col = value_col
           )
         }
@@ -475,14 +492,14 @@ run_one_replicate <- function(prepared_inputs,
 
       rep_region_est <- dplyr::left_join(
         reg_curve,
-        reg_var_tbl[, c("site_region", "horizon_bucket", "bucket_start", "bucket_end", "var_hat", "se"), drop = FALSE],
-        by = c("site_region", "horizon_bucket", "bucket_start", "bucket_end")
+        reg_var_tbl[, c("site_region", "horizon_bin", "bin_start", "bin_end", "var_hat", "se"), drop = FALSE],
+        by = c("site_region", "horizon_bin", "bin_start", "bin_end")
       )
 
       rep_region_est$replicate_id <- replicate_id
       rep_region_est <- rep_region_est[, c(
         "replicate_id", "site_region",
-        "horizon_bucket", "bucket_start", "bucket_end",
+        "horizon_bin", "bin_start", "bin_end",
         "estimate", "var_hat", "se"
       )]
     }
@@ -506,7 +523,7 @@ run_one_replicate <- function(prepared_inputs,
       profile = profile,
       normalization = normalization,
       variance_method = variance_method,
-      bucket_width = bucket_width,
+      bin_width = bin_width,
       offset = offset,
       use_site_metadata_fallback = use_site_metadata_fallback,
       augment_to_site_size = augment_to_site_size,
@@ -526,13 +543,13 @@ run_one_replicate <- function(prepared_inputs,
 #' testing.
 #'
 #' By default, temporal allocation is \code{"stochastic"}, so each replicate is a
-#' Monte Carlo realization in which each burial is assigned to one bucket drawn
+#' Monte Carlo realization in which each burial is assigned to one bin drawn
 #' from its phase-level trapezoidal temporal profile. This makes the ensemble's
 #' between-replicate component interpretable as temporal allocation uncertainty.
 #'
 #' @param prepared_inputs Output from \code{assemble_prepared_inputs()}.
 #' @param M Number of replicates.
-#' @param bucket_width Bucket width.
+#' @param bin_width Bin width.
 #' @param offset_mode One of \code{"cycle"}, \code{"random"}, or \code{"fixed"}.
 #' @param fixed_offset Used when \code{offset_mode = "fixed"}.
 #' @param allocation_mode One of \code{"stochastic"}, \code{"fractional"}, or
@@ -554,7 +571,7 @@ run_one_replicate <- function(prepared_inputs,
 #' @return Structured ensemble object.
 run_temporal_ensemble <- function(prepared_inputs,
                                   M = 50L,
-                                  bucket_width = 25,
+                                  bin_width = 25,
                                   offset_mode = c("cycle", "random", "fixed"),
                                   fixed_offset = 0,
                                   allocation_mode = c("stochastic", "fractional", "deterministic_max"),
@@ -580,7 +597,7 @@ run_temporal_ensemble <- function(prepared_inputs,
 
   offsets <- generate_temporal_offsets(
     M = M,
-    bucket_width = bucket_width,
+    bin_width = bin_width,
     mode = offset_mode,
     fixed_offset = fixed_offset,
     seed = seed
@@ -592,7 +609,7 @@ run_temporal_ensemble <- function(prepared_inputs,
     run_one_replicate(
       prepared_inputs = prepared_inputs,
       replicate_id = i,
-      bucket_width = bucket_width,
+      bin_width = bin_width,
       offset = offsets[i],
       allocation_mode = allocation_mode,
       profile = profile,
@@ -626,7 +643,7 @@ run_temporal_ensemble <- function(prepared_inputs,
         cl = cl,
         varlist = c(
           "prepared_inputs",
-          "bucket_width",
+          "bin_width",
           "offsets",
           "allocation_mode",
           "profile",
@@ -669,7 +686,7 @@ run_temporal_ensemble <- function(prepared_inputs,
     region_replicate_estimates = tibble::as_tibble(region_rep_estimates),
     settings = list(
       M = M,
-      bucket_width = bucket_width,
+      bin_width = bin_width,
       offset_mode = offset_mode,
       fixed_offset = fixed_offset,
       allocation_mode = allocation_mode,
@@ -696,161 +713,161 @@ run_temporal_ensemble <- function(prepared_inputs,
 # Final pooling
 # -------------------------------------------------------------------------
 
-  #' Finalize a temporal ensemble by pooling replicate uncertainty
-  #'
-  #' @param ensemble_result Output from run_temporal_ensemble().
-  #' @param conf_level Confidence level for intervals.
-  #' @param use_t Whether to use t critical values in pooling.
-  #' @param canonical_offset Offset for the final pooled bucket grid.
-  #'
-  #' @return Structured pooled result object.
-  finalize_ensemble <- function(ensemble_result,
-                                conf_level = 0.95,
-                                use_t = TRUE,
-                                canonical_offset = 0) {
-    if (!is.list(ensemble_result) || is.null(ensemble_result$replicate_estimates)) {
-      rlang::abort("`ensemble_result` must be an object returned by `run_temporal_ensemble()`.")
-    }
-
-    rep_est_raw <- tibble::as_tibble(ensemble_result$replicate_estimates)
-
-    if (nrow(rep_est_raw) == 0) {
-      rlang::abort("`ensemble_result$replicate_estimates` is empty.")
-    }
-
-    bucket_width <- ensemble_result$settings$bucket_width
-    if (is.null(bucket_width) || !is.numeric(bucket_width) || length(bucket_width) != 1L || is.na(bucket_width) || bucket_width <= 0) {
-      rlang::abort("Could not determine a valid `bucket_width` from `ensemble_result$settings`.")
-    }
-
-    canonical_grid <- make_canonical_grid_from_replicates(
-      replicate_estimates = rep_est_raw,
-      bucket_width = bucket_width,
-      canonical_offset = canonical_offset
-    )
-
-    split_reps <- split(rep_est_raw, rep_est_raw$replicate_id)
-
-    rep_est_regridded <- dplyr::bind_rows(
-      lapply(split_reps, regrid_replicate_estimates, canonical_grid = canonical_grid)
-    )
-
-    pooled <- pool_replicate_uncertainty(
-      replicate_estimates = rep_est_regridded,
-      conf_level = conf_level,
-      use_t = use_t
-    )
-
-    components <- summarize_uncertainty_components(pooled)
-
-    # Regional pooling
-    pooled_region <- NULL
-    region_rep_raw <- NULL
-    region_rep_regridded <- NULL
-
-    if (!is.null(ensemble_result$region_replicate_estimates)) {
-      region_rep_raw <- tibble::as_tibble(ensemble_result$region_replicate_estimates)
-
-      if (nrow(region_rep_raw) > 0) {
-        split_region_reps <- split(region_rep_raw, region_rep_raw$replicate_id)
-
-        region_rep_regridded <- dplyr::bind_rows(
-          lapply(split_region_reps, regrid_region_replicate_estimates, canonical_grid = canonical_grid)
-        )
-
-        pooled_region <- region_rep_regridded |>
-          dplyr::group_by(site_region, horizon_bucket, bucket_start, bucket_end) |>
-          dplyr::summarise(
-            M = dplyr::n_distinct(replicate_id),
-            estimate_mean = mean(estimate, na.rm = TRUE),
-            W = mean(var_hat, na.rm = TRUE),
-            B = if (dplyr::n() > 1) stats::var(estimate, na.rm = TRUE) else 0,
-            .groups = "drop"
-          ) |>
-          dplyr::rename(estimate = estimate_mean)
-
-        pooled_region$W[!is.finite(pooled_region$W)] <- NA_real_
-        pooled_region$B[!is.finite(pooled_region$B)] <- 0
-        pooled_region$T <- pooled_region$W + (1 + 1 / pooled_region$M) * pooled_region$B
-        pooled_region$se_within <- sqrt(pooled_region$W)
-        pooled_region$se_between <- sqrt(pooled_region$B)
-        pooled_region$se_total <- sqrt(pooled_region$T)
-
-        if (use_t) {
-          pooled_region$df <- Inf
-          use_df <- pooled_region$M > 1 & is.finite(pooled_region$W) & is.finite(pooled_region$B) & pooled_region$B > 0
-          pooled_region$df[use_df] <- (pooled_region$M[use_df] - 1) *
-            (1 + pooled_region$W[use_df] / ((1 + 1 / pooled_region$M[use_df]) * pooled_region$B[use_df]))^2
-
-          crit <- stats::qt((1 + conf_level) / 2, df = pooled_region$df)
-          crit[!is.finite(crit)] <- stats::qnorm((1 + conf_level) / 2)
-        } else {
-          pooled_region$df <- Inf
-          crit <- rep(stats::qnorm((1 + conf_level) / 2), nrow(pooled_region))
-        }
-
-        pooled_region$crit <- crit
-        pooled_region$conf_level <- conf_level
-        pooled_region$lower <- pooled_region$estimate - pooled_region$crit * pooled_region$se_total
-        pooled_region$upper <- pooled_region$estimate + pooled_region$crit * pooled_region$se_total
-      }
-    }
-
-    # Collect replicate-level data for later significance testing.
-    site_bucket_replicates <- lapply(
-      ensemble_result$replicate_results,
-      function(x) x$analysis$data$site_bucket
-    )
-
-    bucket_curve_replicates <- lapply(
-      ensemble_result$replicate_results,
-      function(x) x$analysis$data$bucket_curve
-    )
-
-    region_bucket_replicates <- lapply(
-      ensemble_result$replicate_results,
-      function(x) x$analysis$data$region_bucket
-    )
-
-    burial_allocation_replicates <- lapply(
-      ensemble_result$replicate_results,
-      function(x) x$burial_allocations
-    )
-
-    if (all(vapply(burial_allocation_replicates, is.null, logical(1)))) {
-      burial_allocation_replicates <- NULL
-    }
-
-    list(
-      pooled = list(
-        estimates = pooled,
-        components = components,
-        region_estimates = if (is.null(pooled_region)) NULL else tibble::as_tibble(pooled_region),
-        canonical_grid = canonical_grid
-      ),
-      replicate_estimates = rep_est_regridded,
-      raw_replicate_estimates = rep_est_raw,
-      region_replicate_estimates = if (is.null(region_rep_regridded)) NULL else tibble::as_tibble(region_rep_regridded),
-      raw_region_replicate_estimates = if (is.null(region_rep_raw)) NULL else tibble::as_tibble(region_rep_raw),
-      replicate_results = ensemble_result$replicate_results,
-      replicate_data = list(
-        site_bucket = site_bucket_replicates,
-        bucket_curve = bucket_curve_replicates,
-        region_bucket = region_bucket_replicates,
-        burial_allocations = burial_allocation_replicates
-      ),
-      diagnostics = list(
-        ensemble = ensemble_result$diagnostics,
-        pooling = list(
-          n_replicates = dplyr::n_distinct(rep_est_regridded$replicate_id),
-          n_pooled_buckets = nrow(pooled),
-          n_pooled_region_rows = if (is.null(pooled_region)) 0L else nrow(pooled_region),
-          conf_level = conf_level,
-          use_t = use_t,
-          bucket_width = bucket_width,
-          canonical_offset = canonical_offset
-        )
-      ),
-      settings = ensemble_result$settings
-    )
+#' Finalize a temporal ensemble by pooling replicate uncertainty
+#'
+#' @param ensemble_result Output from run_temporal_ensemble().
+#' @param conf_level Confidence level for intervals.
+#' @param use_t Whether to use t critical values in pooling.
+#' @param canonical_offset Offset for the final pooled bin grid.
+#'
+#' @return Structured pooled result object.
+finalize_ensemble <- function(ensemble_result,
+                              conf_level = 0.95,
+                              use_t = TRUE,
+                              canonical_offset = 0) {
+  if (!is.list(ensemble_result) || is.null(ensemble_result$replicate_estimates)) {
+    rlang::abort("`ensemble_result` must be an object returned by `run_temporal_ensemble()`.")
   }
+
+  rep_est_raw <- tibble::as_tibble(ensemble_result$replicate_estimates)
+
+  if (nrow(rep_est_raw) == 0) {
+    rlang::abort("`ensemble_result$replicate_estimates` is empty.")
+  }
+
+  bin_width <- ensemble_result$settings$bin_width
+  if (is.null(bin_width) || !is.numeric(bin_width) || length(bin_width) != 1L || is.na(bin_width) || bin_width <= 0) {
+    rlang::abort("Could not determine a valid `bin_width` from `ensemble_result$settings`.")
+  }
+
+  canonical_grid <- make_canonical_grid_from_replicates(
+    replicate_estimates = rep_est_raw,
+    bin_width = bin_width,
+    canonical_offset = canonical_offset
+  )
+
+  split_reps <- split(rep_est_raw, rep_est_raw$replicate_id)
+
+  rep_est_regridded <- dplyr::bind_rows(
+    lapply(split_reps, regrid_replicate_estimates, canonical_grid = canonical_grid)
+  )
+
+  pooled <- pool_replicate_uncertainty(
+    replicate_estimates = rep_est_regridded,
+    conf_level = conf_level,
+    use_t = use_t
+  )
+
+  components <- summarize_uncertainty_components(pooled)
+
+  # Regional pooling
+  pooled_region <- NULL
+  region_rep_raw <- NULL
+  region_rep_regridded <- NULL
+
+  if (!is.null(ensemble_result$region_replicate_estimates)) {
+    region_rep_raw <- tibble::as_tibble(ensemble_result$region_replicate_estimates)
+
+    if (nrow(region_rep_raw) > 0) {
+      split_region_reps <- split(region_rep_raw, region_rep_raw$replicate_id)
+
+      region_rep_regridded <- dplyr::bind_rows(
+        lapply(split_region_reps, regrid_region_replicate_estimates, canonical_grid = canonical_grid)
+      )
+
+      pooled_region <- region_rep_regridded %>%
+        dplyr::group_by(site_region, horizon_bin, bin_start, bin_end) %>%
+        dplyr::summarise(
+          M = dplyr::n_distinct(replicate_id),
+          estimate_mean = mean(estimate, na.rm = TRUE),
+          W = mean(var_hat, na.rm = TRUE),
+          B = if (dplyr::n() > 1) stats::var(estimate, na.rm = TRUE) else 0,
+          .groups = "drop"
+        ) %>%
+        dplyr::rename(estimate = estimate_mean)
+
+      pooled_region$W[!is.finite(pooled_region$W)] <- NA_real_
+      pooled_region$B[!is.finite(pooled_region$B)] <- 0
+      pooled_region$T <- pooled_region$W + (1 + 1 / pooled_region$M) * pooled_region$B
+      pooled_region$se_within <- sqrt(pooled_region$W)
+      pooled_region$se_between <- sqrt(pooled_region$B)
+      pooled_region$se_total <- sqrt(pooled_region$T)
+
+      if (use_t) {
+        pooled_region$df <- Inf
+        use_df <- pooled_region$M > 1 & is.finite(pooled_region$W) & is.finite(pooled_region$B) & pooled_region$B > 0
+        pooled_region$df[use_df] <- (pooled_region$M[use_df] - 1) *
+          (1 + pooled_region$W[use_df] / ((1 + 1 / pooled_region$M[use_df]) * pooled_region$B[use_df]))^2
+
+        crit <- stats::qt((1 + conf_level) / 2, df = pooled_region$df)
+        crit[!is.finite(crit)] <- stats::qnorm((1 + conf_level) / 2)
+      } else {
+        pooled_region$df <- Inf
+        crit <- rep(stats::qnorm((1 + conf_level) / 2), nrow(pooled_region))
+      }
+
+      pooled_region$crit <- crit
+      pooled_region$conf_level <- conf_level
+      pooled_region$lower <- pooled_region$estimate - pooled_region$crit * pooled_region$se_total
+      pooled_region$upper <- pooled_region$estimate + pooled_region$crit * pooled_region$se_total
+    }
+  }
+
+  # Collect replicate-level data for later significance testing.
+  site_bin_replicates <- lapply(
+    ensemble_result$replicate_results,
+    function(x) x$analysis$data$site_bin
+  )
+
+  bin_curve_replicates <- lapply(
+    ensemble_result$replicate_results,
+    function(x) x$analysis$data$bin_curve
+  )
+
+  region_bin_replicates <- lapply(
+    ensemble_result$replicate_results,
+    function(x) x$analysis$data$region_bin
+  )
+
+  burial_allocation_replicates <- lapply(
+    ensemble_result$replicate_results,
+    function(x) x$burial_allocations
+  )
+
+  if (all(vapply(burial_allocation_replicates, is.null, logical(1)))) {
+    burial_allocation_replicates <- NULL
+  }
+
+  list(
+    pooled = list(
+      estimates = pooled,
+      components = components,
+      region_estimates = if (is.null(pooled_region)) NULL else tibble::as_tibble(pooled_region),
+      canonical_grid = canonical_grid
+    ),
+    replicate_estimates = rep_est_regridded,
+    raw_replicate_estimates = rep_est_raw,
+    region_replicate_estimates = if (is.null(region_rep_regridded)) NULL else tibble::as_tibble(region_rep_regridded),
+    raw_region_replicate_estimates = if (is.null(region_rep_raw)) NULL else tibble::as_tibble(region_rep_raw),
+    replicate_results = ensemble_result$replicate_results,
+    replicate_data = list(
+      site_bin = site_bin_replicates,
+      bin_curve = bin_curve_replicates,
+      region_bin = region_bin_replicates,
+      burial_allocations = burial_allocation_replicates
+    ),
+    diagnostics = list(
+      ensemble = ensemble_result$diagnostics,
+      pooling = list(
+        n_replicates = dplyr::n_distinct(rep_est_regridded$replicate_id),
+        n_pooled_bins = nrow(pooled),
+        n_pooled_region_rows = if (is.null(pooled_region)) 0L else nrow(pooled_region),
+        conf_level = conf_level,
+        use_t = use_t,
+        bin_width = bin_width,
+        canonical_offset = canonical_offset
+      )
+    ),
+    settings = ensemble_result$settings
+  )
+}
