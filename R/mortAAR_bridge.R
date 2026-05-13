@@ -1,6 +1,6 @@
 # mortAAR_bridge.R
 #
-# Bridge helpers between the ensemble occupancy workflow and mortAAR.
+# Bridge helpers between OccuPast and mortAAR.
 #
 # Purpose:
 # - prepare burial-level mortAAR input from ensemble output
@@ -8,19 +8,19 @@
 # - compute the same metrics across sliding temporal windows
 # - optionally build mortAAR life-table objects for those windows
 #
-# Design notes:
-# - Time assignment is based on `median_bucket` produced by prepare_for_mortAAR().
+# Design:
+# - Time assignment is based on `median_bin` produced by prepare_for_mortAAR().
 # - Indeterminate-sex burials are RETAINED in the burial table and general
 #   life-table computations, but sex-relation metrics are computed only from
 #   sexed individuals ("f" / "m").
-# - Burial-level representative buckets are snapped to the canonical grid stored
+# - Burial-level representative bins are snapped to the canonical grid stored
 #   in `final$pooled$canonical_grid`.
 # - mortAAR should not receive `group = NULL`; the `group` argument must be
 #   omitted when no grouping is desired.
 #
 # Expected upstream functions:
 # - validate_required_fields()
-# - flag_uncertain_fallback_buckets()
+# - flag_uncertain_fallback_bins()
 
 # -------------------------------------------------------------------------
 # Internal helpers
@@ -34,10 +34,10 @@
 #'
 #' @param final Finalized ensemble object.
 #' @param prepared Prepared input object.
-#' @param window_width Width of each window in bucket units.
+#' @param window_width Width of each window in bin units.
 #' @param step_size Step size between successive windows.
-#' @param start_bucket Optional lower bound for the first window start.
-#' @param end_bucket Optional upper bound for the final window end.
+#' @param start_bin Optional lower bound for the first window start.
+#' @param end_bin Optional upper bound for the final window end.
 #' @param method Method passed to `mortAAR::prep.life.table()`.
 #'
 #' @return Named list of grouped mortAAR life-table objects.
@@ -45,8 +45,8 @@ compute_life_tables_windows_by_sex <- function(final,
                                                prepared,
                                                window_width,
                                                step_size,
-                                               start_bucket = NULL,
-                                               end_bucket = NULL,
+                                               start_bin = NULL,
+                                               end_bin = NULL,
                                                method = "Standard") {
   .assert_package_mortAAR()
 
@@ -57,8 +57,8 @@ compute_life_tables_windows_by_sex <- function(final,
     mort_tbl = mort_tbl,
     window_width = window_width,
     step_size = step_size,
-    start_bucket = start_bucket,
-    end_bucket = end_bucket
+    start_bin = start_bin,
+    end_bin = end_bin
   )
 
   out <- purrr::map(seq_len(nrow(windows)), function(i) {
@@ -191,26 +191,26 @@ extract_life_table_measure_windows_by_group <- function(life_tables_windows_by_g
 #'
 #' @param final Finalized ensemble object.
 #' @param prepared Prepared input object.
-#' @param window_width Width of each window in bucket units.
+#' @param window_width Width of each window in bin units.
 #' @param step_size Step size between successive windows.
-#' @param start_bucket Optional lower bound for the first window start.
-#' @param end_bucket Optional upper bound for the final window end.
+#' @param start_bin Optional lower bound for the first window start.
+#' @param end_bin Optional upper bound for the final window end.
 #'
 #' @return Tibble with one row per window.
 compute_mortaar_pooled_metrics_windows <- function(final,
                                                    prepared,
                                                    window_width,
                                                    step_size,
-                                                   start_bucket = NULL,
-                                                   end_bucket = NULL) {
+                                                   start_bin = NULL,
+                                                   end_bin = NULL) {
   mort_tbl <- build_mortaar_burial_table(final, prepared)
 
   windows <- make_mortaar_windows(
     mort_tbl = mort_tbl,
     window_width = window_width,
     step_size = step_size,
-    start_bucket = start_bucket,
-    end_bucket = end_bucket
+    start_bin = start_bin,
+    end_bin = end_bin
   )
 
   purrr::map_dfr(seq_len(nrow(windows)), function(i) {
@@ -513,82 +513,6 @@ plot_life_table_changes_by_sex <- function(life_tables_windows_by_sex,
 # Life-table trajectory extraction and plotting
 # -------------------------------------------------------------------------
 
-#' Extract one life-table measure across sliding windows
-#'
-#' @description
-#' Converts a named list of mortAAR life-table objects into one long table
-#' containing a selected measure (e.g. qx, dx, lx, ex, rel_popx) across all
-#' available windows.
-#'
-#' @param life_tables_windows Named list returned by `compute_life_tables_windows()`.
-#' @param measure One of "qx", "dx", "lx", "ex", or "rel_popx".
-#'
-#' @return Tibble with columns `window_label`, `window_start`, `window_end`,
-#'   `window_mid`, `age`, and `value`.
-extract_life_table_measure_windows <- function(life_tables_windows,
-                                               measure = c("qx", "dx", "lx", "ex", "rel_popx")) {
-  measure <- match.arg(measure)
-
-  if (is.null(life_tables_windows) || length(life_tables_windows) == 0) {
-    stop("`life_tables_windows` is empty.", call. = FALSE)
-  }
-
-  out <- purrr::map_dfr(names(life_tables_windows), function(nm) {
-    lt <- life_tables_windows[[nm]]
-    if (is.null(lt)) return(NULL)
-
-    # mortAAR life tables are data-frame-like; try tibble conversion directly
-    lt_tbl <- try(tibble::as_tibble(as.data.frame(lt)), silent = TRUE)
-    if (inherits(lt_tbl, "try-error")) return(NULL)
-
-    if (!measure %in% names(lt_tbl)) {
-      return(NULL)
-    }
-
-    # Try to identify an age/x column
-    age_col <- names(lt_tbl)[names(lt_tbl) %in% c("x", "age", "agebeg", "Age", "X")]
-    if (length(age_col) == 0) {
-      # fallback: use row index if no age column is present
-      lt_tbl$age_proxy <- seq_len(nrow(lt_tbl))
-      age_col <- "age_proxy"
-    } else {
-      age_col <- age_col[1]
-    }
-
-    # Parse window label, expected like "0_80"
-    parts <- strsplit(nm, "_")[[1]]
-    window_start <- suppressWarnings(as.numeric(parts[1]))
-    window_end   <- suppressWarnings(as.numeric(parts[2]))
-    window_mid   <- if (is.finite(window_start) && is.finite(window_end)) {
-      (window_start + window_end) / 2
-    } else {
-      NA_real_
-    }
-
-    tibble::tibble(
-      window_label = nm,
-      window_start = window_start,
-      window_end = window_end,
-      window_mid = window_mid,
-      age = lt_tbl[[age_col]],
-      value = lt_tbl[[measure]]
-    )
-  })
-
-  if (nrow(out) == 0) {
-    stop("No plottable life-table data could be extracted for the requested measure.", call. = FALSE)
-  }
-
-  out <- out %>%
-    dplyr::mutate(
-      age_lower = suppressWarnings(as.numeric(sub("-.*", "", age)))
-    ) %>%
-    dplyr::arrange(window_mid, age_lower) %>%
-    dplyr::mutate(
-      age = factor(age, levels = unique(age[order(age_lower)]))
-    )
-}
-
 #' Plot changes in a life-table measure across sliding windows
 #'
 #' @description
@@ -803,17 +727,62 @@ plot_all_life_table_changes <- function(life_tables_windows,
   NULL
 }
 
-.snap_to_canonical_bucket <- function(x, canonical_buckets) {
-  canonical_buckets <- sort(unique(stats::na.omit(as.numeric(canonical_buckets))))
+.snap_to_canonical_bin <- function(x, canonical_bins) {
+  canonical_bins <- sort(unique(stats::na.omit(as.numeric(canonical_bins))))
 
-  if (length(canonical_buckets) == 0) {
-    rlang::abort("`canonical_buckets` must contain at least one finite value.")
+  if (length(canonical_bins) == 0) {
+    rlang::abort("`canonical_bins` must contain at least one finite value.")
   }
 
   vapply(as.numeric(x), function(xx) {
     if (is.na(xx) || !is.finite(xx)) return(NA_real_)
-    canonical_buckets[which.min(abs(canonical_buckets - xx))]
+    canonical_bins[which.min(abs(canonical_bins - xx))]
   }, numeric(1))
+}
+
+
+# Backwards-compatible alias. New code should use .snap_to_canonical_bin().
+.snap_to_canonical_bucket <- function(x, canonical_buckets) {
+  .snap_to_canonical_bin(x, canonical_buckets)
+}
+
+# Standardise legacy bin names only at the boundaries of this bridge. The main
+# codebase now uses horizon_bin / median_bin, but older saved ensemble objects
+# may still contain horizon_bucket / median_bucket.
+.mortaar_standardize_bin_columns <- function(df) {
+  if (exists(".standardize_bin_columns", mode = "function")) {
+    df <- .standardize_bin_columns(df)
+  }
+
+  legacy <- c(
+    horizon_bucket = "horizon_bin",
+    median_bucket = "median_bin",
+    bucket_mean = "bin_mean",
+    bucket_sd = "bin_sd",
+    bucket_q25 = "bin_q25",
+    bucket_q75 = "bin_q75",
+    bucket_min = "bin_min",
+    bucket_max = "bin_max"
+  )
+
+  for (old in names(legacy)) {
+    new <- legacy[[old]]
+    if (old %in% names(df) && !new %in% names(df)) {
+      names(df)[names(df) == old] <- new
+    }
+  }
+
+  df
+}
+
+.mortaar_fallback_diagnostics <- function(final, ...) {
+  if (exists("flag_uncertain_fallback_bins", mode = "function")) {
+    return(flag_uncertain_fallback_bins(final = final, ...))
+  }
+  if (exists("flag_uncertain_fallback_buckets", mode = "function")) {
+    return(flag_uncertain_fallback_buckets(final = final, ...))
+  }
+  NULL
 }
 
 # -------------------------------------------------------------------------
@@ -826,11 +795,11 @@ plot_all_life_table_changes <- function(life_tables_windows,
 #' Creates a burial-level table suitable for downstream mortAAR workflows.
 #' One row is returned per burial (`UID`). The table preserves as many prepared
 #' mortuary and metadata fields as possible, adds a representative temporal
-#' assignment defined as the median bucket across ensemble replicates, and
-#' attaches uncertainty and diagnostic information for that representative bucket.
+#' assignment defined as the median bin across ensemble replicates, and
+#' attaches uncertainty and diagnostic information for that representative bin.
 #'
 #' Burial-level temporal summaries are computed from replicate allocations and
-#' then snapped to the canonical bucket grid stored in
+#' then snapped to the canonical bin grid stored in
 #' `final$pooled$canonical_grid`, ensuring consistency with pooled ensemble
 #' outputs.
 #'
@@ -840,15 +809,15 @@ plot_all_life_table_changes <- function(life_tables_windows,
 #'
 #' @param final Finalized ensemble object from `finalize_ensemble()`.
 #' @param prepared Optional prepared object from `assemble_prepared_inputs()`.
-#' @param include_bucket_uncertainty If TRUE, attach pooled uncertainty for the
-#'   burial's median bucket.
+#' @param include_bin_uncertainty If TRUE, attach pooled uncertainty for the
+#'   burial's median bin.
 #' @param include_fallback_diagnostic If TRUE, attach fallback/uncertainty
 #'   diagnostic fields when available.
 #'
 #' @return Tibble with one row per burial.
 prepare_for_mortAAR <- function(final,
                                 prepared = NULL,
-                                include_bucket_uncertainty = TRUE,
+                                include_bin_uncertainty = TRUE,
                                 include_fallback_diagnostic = TRUE) {
   if (!is.list(final) ||
       is.null(final$replicate_data) ||
@@ -870,18 +839,20 @@ prepare_for_mortAAR <- function(final,
 
   canonical_grid <- NULL
   if (!is.null(final$pooled) && !is.null(final$pooled$canonical_grid)) {
-    canonical_grid <- tibble::as_tibble(final$pooled$canonical_grid)
+    canonical_grid <- tibble::as_tibble(final$pooled$canonical_grid) %>%
+      .mortaar_standardize_bin_columns()
   }
 
-  if (is.null(canonical_grid) || !"horizon_bucket" %in% names(canonical_grid)) {
+  if (is.null(canonical_grid) || !"horizon_bin" %in% names(canonical_grid)) {
     rlang::abort("`final$pooled$canonical_grid` is required for mortAAR preparation.")
   }
 
-  canonical_buckets <- sort(unique(canonical_grid$horizon_bucket))
+  canonical_bins <- sort(unique(canonical_grid$horizon_bin))
 
   alloc_long <- dplyr::bind_rows(
     lapply(seq_along(alloc_reps), function(i) {
-      x <- tibble::as_tibble(alloc_reps[[i]])
+      x <- tibble::as_tibble(alloc_reps[[i]]) %>%
+        .mortaar_standardize_bin_columns()
       x$replicate_id <- i
       x
     })
@@ -889,24 +860,24 @@ prepare_for_mortAAR <- function(final,
 
   validate_required_fields(
     alloc_long,
-    c("UID", "horizon_bucket"),
+    c("UID", "horizon_bin"),
     "burial_allocations"
   )
 
   raw_q25 <- function(x) stats::quantile(x, probs = 0.25, na.rm = TRUE, names = FALSE)
   raw_q75 <- function(x) stats::quantile(x, probs = 0.75, na.rm = TRUE, names = FALSE)
 
-  burial_summary <- alloc_long |>
-    dplyr::group_by(UID) |>
+  burial_summary <- alloc_long %>%
+    dplyr::group_by(UID) %>%
     dplyr::summarise(
-      median_bucket_raw = stats::median(as.numeric(horizon_bucket), na.rm = TRUE),
-      bucket_mean_raw = mean(as.numeric(horizon_bucket), na.rm = TRUE),
-      bucket_sd = stats::sd(as.numeric(horizon_bucket), na.rm = TRUE),
-      bucket_q25_raw = raw_q25(as.numeric(horizon_bucket)),
-      bucket_q75_raw = raw_q75(as.numeric(horizon_bucket)),
-      bucket_min_raw = min(as.numeric(horizon_bucket), na.rm = TRUE),
-      bucket_max_raw = max(as.numeric(horizon_bucket), na.rm = TRUE),
-      bucket_n_replicates = dplyr::n_distinct(replicate_id),
+      median_bin_raw = stats::median(as.numeric(horizon_bin), na.rm = TRUE),
+      bin_mean_raw = mean(as.numeric(horizon_bin), na.rm = TRUE),
+      bin_sd = stats::sd(as.numeric(horizon_bin), na.rm = TRUE),
+      bin_q25_raw = raw_q25(as.numeric(horizon_bin)),
+      bin_q75_raw = raw_q75(as.numeric(horizon_bin)),
+      bin_min_raw = min(as.numeric(horizon_bin), na.rm = TRUE),
+      bin_max_raw = max(as.numeric(horizon_bin), na.rm = TRUE),
+      bin_n_replicates = dplyr::n_distinct(replicate_id),
       chronology_source = dplyr::first(chronology_source),
       is_synthetic = dplyr::first(is_synthetic),
       input_type = dplyr::first(input_type),
@@ -919,14 +890,14 @@ prepare_for_mortAAR <- function(final,
       sex_gender = dplyr::first(sex_gender),
       age = dplyr::first(age),
       .groups = "drop"
-    ) |>
+    ) %>%
     dplyr::mutate(
-      median_bucket = .snap_to_canonical_bucket(median_bucket_raw, canonical_buckets),
-      bucket_q25 = .snap_to_canonical_bucket(bucket_q25_raw, canonical_buckets),
-      bucket_q75 = .snap_to_canonical_bucket(bucket_q75_raw, canonical_buckets),
-      bucket_min = .snap_to_canonical_bucket(bucket_min_raw, canonical_buckets),
-      bucket_max = .snap_to_canonical_bucket(bucket_max_raw, canonical_buckets),
-      bucket_mean = bucket_mean_raw
+      median_bin = .snap_to_canonical_bin(median_bin_raw, canonical_bins),
+      bin_q25 = .snap_to_canonical_bin(bin_q25_raw, canonical_bins),
+      bin_q75 = .snap_to_canonical_bin(bin_q75_raw, canonical_bins),
+      bin_min = .snap_to_canonical_bin(bin_min_raw, canonical_bins),
+      bin_max = .snap_to_canonical_bin(bin_max_raw, canonical_bins),
+      bin_mean = bin_mean_raw
     )
 
   out <- burial_summary
@@ -952,30 +923,31 @@ prepare_for_mortAAR <- function(final,
     )
   }
 
-  if (isTRUE(include_bucket_uncertainty)) {
+  if (isTRUE(include_bin_uncertainty)) {
     pooled_tbl <- .extract_tbl_mortaar(final, c("pooled", "estimates"))
 
     if (!is.null(pooled_tbl)) {
-      bucket_unc <- pooled_tbl |>
-        dplyr::select(horizon_bucket, W, B, T, se_total, lower, upper) |>
+      pooled_tbl <- .mortaar_standardize_bin_columns(pooled_tbl)
+      bin_unc <- pooled_tbl %>%
+        dplyr::select(horizon_bin, W, B, T, se_total, lower, upper) %>%
         dplyr::rename(
-          bucket_W = W,
-          bucket_B = B,
-          bucket_T = T,
-          bucket_se_total = se_total,
-          bucket_lower = lower,
-          bucket_upper = upper
+          bin_W = W,
+          bin_B = B,
+          bin_T = T,
+          bin_se_total = se_total,
+          bin_lower = lower,
+          bin_upper = upper
         )
 
-      names(bucket_unc)[1] <- "median_bucket"
+      names(bin_unc)[1] <- "median_bin"
 
-      out <- dplyr::left_join(out, bucket_unc, by = "median_bucket")
+      out <- dplyr::left_join(out, bin_unc, by = "median_bin")
     }
   }
 
   if (isTRUE(include_fallback_diagnostic)) {
     diag_tbl <- try(
-      flag_uncertain_fallback_buckets(
+      .mortaar_fallback_diagnostics(
         final = final,
         provenance_source = final,
         fallback_threshold = 0.25,
@@ -986,17 +958,18 @@ prepare_for_mortAAR <- function(final,
     )
 
     if (!inherits(diag_tbl, "try-error") && !is.null(diag_tbl)) {
-      diag_tbl <- tibble::as_tibble(diag_tbl) |>
-        dplyr::select(horizon_bucket, fallback_share, BW_ratio, BT_share, flagged) |>
+      diag_tbl <- tibble::as_tibble(diag_tbl) %>%
+        .mortaar_standardize_bin_columns() %>%
+        dplyr::select(horizon_bin, fallback_share, BW_ratio, BT_share, flagged) %>%
         dplyr::rename(
-          median_bucket = horizon_bucket,
-          fallback_share_at_bucket = fallback_share,
-          BW_ratio_at_bucket = BW_ratio,
-          BT_share_at_bucket = BT_share,
+          median_bin = horizon_bin,
+          fallback_share_at_bin = fallback_share,
+          BW_ratio_at_bin = BW_ratio,
+          BT_share_at_bin = BT_share,
           flagged_fallback_uncertainty = flagged
         )
 
-      out <- dplyr::left_join(out, diag_tbl, by = "median_bucket")
+      out <- dplyr::left_join(out, diag_tbl, by = "median_bin")
     }
   }
 
@@ -1105,7 +1078,7 @@ build_mortaar_burial_table <- function(final, prepared) {
   mortAAR_input <- prepare_for_mortAAR(
     final = final,
     prepared = prepared,
-    include_bucket_uncertainty = TRUE,
+    include_bin_uncertainty = TRUE,
     include_fallback_diagnostic = TRUE
   )
 
@@ -1406,20 +1379,20 @@ compute_mortaar_site_metrics_all <- function(final, prepared) {
 # Sliding windows
 # -------------------------------------------------------------------------
 
-#' Create sliding time windows on the median-bucket scale
+#' Create sliding time windows on the median-bin scale
 #'
 #' @param mort_tbl MortAAR-ready burial table.
-#' @param window_width Width of each window in bucket units.
+#' @param window_width Width of each window in bin units.
 #' @param step_size Step size between successive windows.
-#' @param start_bucket Optional lower bound for the first window start.
-#' @param end_bucket Optional upper bound for the final window end.
+#' @param start_bin Optional lower bound for the first window start.
+#' @param end_bin Optional upper bound for the final window end.
 #'
 #' @return Tibble with `window_id`, `window_start`, `window_end`, `window_mid`.
 make_mortaar_windows <- function(mort_tbl,
                                  window_width,
                                  step_size,
-                                 start_bucket = NULL,
-                                 end_bucket = NULL) {
+                                 start_bin = NULL,
+                                 end_bin = NULL) {
   if (!is.numeric(window_width) || length(window_width) != 1L || is.na(window_width) || window_width <= 0) {
     stop("`window_width` must be a single positive number.", call. = FALSE)
   }
@@ -1427,23 +1400,23 @@ make_mortaar_windows <- function(mort_tbl,
     stop("`step_size` must be a single positive number.", call. = FALSE)
   }
 
-  mb <- sort(unique(stats::na.omit(mort_tbl$median_bucket)))
+  mb <- sort(unique(stats::na.omit(mort_tbl$median_bin)))
   if (length(mb) == 0) {
-    stop("No valid `median_bucket` values available.", call. = FALSE)
+    stop("No valid `median_bin` values available.", call. = FALSE)
   }
 
-  bucket_step <- if (length(mb) > 1) min(diff(mb)) else step_size
+  bin_step <- if (length(mb) > 1) min(diff(mb)) else step_size
 
-  if (is.null(start_bucket)) {
-    start_bucket <- floor(min(mb, na.rm = TRUE) / bucket_step) * bucket_step
+  if (is.null(start_bin)) {
+    start_bin <- floor(min(mb, na.rm = TRUE) / bin_step) * bin_step
   }
-  if (is.null(end_bucket)) {
-    end_bucket <- ceiling(max(mb, na.rm = TRUE) / bucket_step) * bucket_step
+  if (is.null(end_bin)) {
+    end_bin <- ceiling(max(mb, na.rm = TRUE) / bin_step) * bin_step
   }
 
-  starts <- seq(from = start_bucket, to = end_bucket - window_width, by = step_size)
+  starts <- seq(from = start_bin, to = end_bin - window_width, by = step_size)
   if (length(starts) == 0) {
-    starts <- start_bucket
+    starts <- start_bin
   }
 
   tibble::tibble(
@@ -1464,9 +1437,9 @@ make_mortaar_windows <- function(mort_tbl,
 filter_mortaar_by_window <- function(mort_tbl, window_start, window_end) {
   mort_tbl %>%
     dplyr::filter(
-      !is.na(median_bucket),
-      median_bucket >= window_start,
-      median_bucket <= window_end
+      !is.na(median_bin),
+      median_bin >= window_start,
+      median_bin <= window_end
     )
 }
 
@@ -1478,25 +1451,25 @@ filter_mortaar_by_window <- function(mort_tbl, window_start, window_end) {
 #'
 #' @param final Finalized ensemble object.
 #' @param prepared Prepared input object.
-#' @param window_width Width of each window in bucket units.
+#' @param window_width Width of each window in bin units.
 #' @param step_size Step size between successive windows.
-#' @param start_bucket Optional lower bound for the first window start.
-#' @param end_bucket Optional upper bound for the final window end.
+#' @param start_bin Optional lower bound for the first window start.
+#' @param end_bin Optional upper bound for the final window end.
 #'
 #' @return Tibble with one row per site per window.
 compute_mortaar_site_metrics_windows <- function(final,
                                                  prepared,
                                                  window_width,
                                                  step_size,
-                                                 start_bucket = NULL,
-                                                 end_bucket = NULL) {
+                                                 start_bin = NULL,
+                                                 end_bin = NULL) {
   mort_tbl <- build_mortaar_burial_table(final, prepared)
   windows <- make_mortaar_windows(
     mort_tbl = mort_tbl,
     window_width = window_width,
     step_size = step_size,
-    start_bucket = start_bucket,
-    end_bucket = end_bucket
+    start_bin = start_bin,
+    end_bin = end_bin
   )
 
   purrr::map_dfr(seq_len(nrow(windows)), function(i) {
@@ -1557,10 +1530,10 @@ compute_mortaar_site_metrics_windows <- function(final,
 #'
 #' @param final Finalized ensemble object.
 #' @param prepared Prepared input object.
-#' @param window_width Width of each window in bucket units.
+#' @param window_width Width of each window in bin units.
 #' @param step_size Step size between successive windows.
-#' @param start_bucket Optional lower bound for the first window start.
-#' @param end_bucket Optional upper bound for the final window end.
+#' @param start_bin Optional lower bound for the first window start.
+#' @param end_bin Optional upper bound for the final window end.
 #' @param group Optional grouping column for mortAAR, e.g. "site_name".
 #'   Use NULL or "none" for the whole dataset.
 #' @param method Method passed to `mortAAR::prep.life.table()`.
@@ -1570,8 +1543,8 @@ compute_life_tables_windows <- function(final,
                                         prepared,
                                         window_width,
                                         step_size,
-                                        start_bucket = NULL,
-                                        end_bucket = NULL,
+                                        start_bin = NULL,
+                                        end_bin = NULL,
                                         group = NULL,
                                         method = "Standard") {
   .assert_package_mortAAR()
@@ -1581,8 +1554,8 @@ compute_life_tables_windows <- function(final,
     mort_tbl = mort_tbl,
     window_width = window_width,
     step_size = step_size,
-    start_bucket = start_bucket,
-    end_bucket = end_bucket
+    start_bin = start_bin,
+    end_bin = end_bin
   )
 
   out <- purrr::map(seq_len(nrow(windows)), function(i) {
@@ -1628,10 +1601,10 @@ compute_life_tables_windows <- function(final,
 #'
 #' @param final Finalized ensemble object from `finalize_ensemble()`.
 #' @param prepared Prepared input object from `assemble_prepared_inputs()`.
-#' @param window_width Optional width of sliding windows in bucket units.
+#' @param window_width Optional width of sliding windows in bin units.
 #' @param step_size Optional step size between successive windows.
-#' @param start_bucket Optional lower bound for the first window start.
-#' @param end_bucket Optional upper bound for the final window end.
+#' @param start_bin Optional lower bound for the first window start.
+#' @param end_bin Optional upper bound for the final window end.
 #' @param return_life_tables If TRUE, also compute mortAAR life tables for each window.
 #' @param life_table_group Optional grouping variable passed to
 #'   `prep.life.table()`, e.g. "site_name". Use NULL or "none" for the whole dataset.
@@ -1651,8 +1624,8 @@ run_mortAAR_bridge <- function(final,
                                prepared,
                                window_width = NULL,
                                step_size = NULL,
-                               start_bucket = NULL,
-                               end_bucket = NULL,
+                               start_bin = NULL,
+                               end_bin = NULL,
                                return_life_tables = FALSE,
                                life_table_group = NULL,
                                life_table_method = "Standard") {
@@ -1677,8 +1650,8 @@ run_mortAAR_bridge <- function(final,
       mort_tbl = mortaar_burial_table,
       window_width = window_width,
       step_size = step_size,
-      start_bucket = start_bucket,
-      end_bucket = end_bucket
+      start_bin = start_bin,
+      end_bin = end_bin
     )
 
     site_metrics_windows <- compute_mortaar_site_metrics_windows(
@@ -1686,8 +1659,8 @@ run_mortAAR_bridge <- function(final,
       prepared = prepared,
       window_width = window_width,
       step_size = step_size,
-      start_bucket = start_bucket,
-      end_bucket = end_bucket
+      start_bin = start_bin,
+      end_bin = end_bin
     )
 
     pooled_metrics_windows <- compute_mortaar_pooled_metrics_windows(
@@ -1695,8 +1668,8 @@ run_mortAAR_bridge <- function(final,
       prepared = prepared,
       window_width = window_width,
       step_size = step_size,
-      start_bucket = start_bucket,
-      end_bucket = end_bucket
+      start_bin = start_bin,
+      end_bin = end_bin
     )
 
     if (isTRUE(return_life_tables)) {
@@ -1705,8 +1678,8 @@ run_mortAAR_bridge <- function(final,
         prepared = prepared,
         window_width = window_width,
         step_size = step_size,
-        start_bucket = start_bucket,
-        end_bucket = end_bucket,
+        start_bin = start_bin,
+        end_bin = end_bin,
         group = life_table_group,
         method = life_table_method
       )
@@ -2168,6 +2141,7 @@ extract_life_table_measure_windows <- function(life_tables_windows,
 
     tibble::tibble(
       window = nm,
+      window_label = nm,
       window_start = window_start,
       window_end = window_end,
       window_mid = window_mid,
