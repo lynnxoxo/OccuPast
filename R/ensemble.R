@@ -639,6 +639,18 @@ run_temporal_ensemble <- function(prepared_inputs,
       cl <- parallel::makeCluster(as.integer(n_cores))
       on.exit(parallel::stopCluster(cl), add = TRUE)
 
+      parallel::clusterEvalQ(cl, {
+        suppressPackageStartupMessages({
+          library(magrittr)
+          library(dplyr)
+          library(tidyr)
+          library(purrr)
+          library(tibble)
+          library(rlang)
+        })
+        NULL
+      })
+
       parallel::clusterExport(
         cl = cl,
         varlist = c(
