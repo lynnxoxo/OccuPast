@@ -1,6 +1,6 @@
 # plotting.R
 #
-# Plotting helpers for the merged occupancy package.
+# Plotting helpers for OccuPast.
 #
 # Expected inputs come from:
 # - prepare_data.R
@@ -36,6 +36,7 @@
 # Internal helpers
 # -------------------------------------------------------------------------
 
+#OccuPast palette
 .ocp_palette <- list(
   coral = "#E57050",
   teal = "#86B0A0",
@@ -48,6 +49,7 @@
   point_red = "red3"
 )
 
+#OccuPast ggplot2 theme
 .ocp_theme <- function(base_size = 11, base_family = "") {
   ggplot2::theme_minimal(base_size = base_size, base_family = base_family) +
     ggplot2::theme(
@@ -66,7 +68,7 @@
     ggplot2::labs(
       title = title,
       subtitle = subtitle,
-      x = "Pseudo Horizon",
+      x = "Pseudo-horizon bin",
       y = y_lab
     ) +
     .ocp_theme() +
@@ -162,11 +164,11 @@
   invisible(plot_obj)
 }
 
-#' Flag buckets dominated by between-run variance and site fallback contribution
+#' Flag bins dominated by between-run variance and site fallback contribution
 #'
 #' @description
-#' Joins pooled uncertainty components to provenance contributions by bucket and
-#' identifies buckets where between-replicate variance exceeds within-replicate
+#' Joins pooled uncertainty components to provenance contributions by bin and
+#' identifies bins where between-replicate variance exceeds within-replicate
 #' variance and site-fallback contribution is high.
 #'
 #' This is useful for diagnosing intervals where uncertainty is driven mainly by
@@ -177,19 +179,19 @@
 #'   uncertainty object containing `pooled$estimates`.
 #' @param provenance_source Object usable by `plot_provenance_contributions()`,
 #'   typically `final`, `ens`, or `analysis`.
-#' @param fallback_threshold Minimum fallback share required to flag a bucket.
+#' @param fallback_threshold Minimum fallback share required to flag a bin.
 #'   Default is 0.25.
-#' @param ratio_threshold Minimum `B/W` ratio required to flag a bucket.
+#' @param ratio_threshold Minimum `B/W` ratio required to flag a bin.
 #'   Default is 1.
 #' @param normalized If TRUE, use normalized provenance columns where available.
 #'
-#' @return Tibble with bucket-level uncertainty/provenance diagnostics and a
+#' @return Tibble with bin-level uncertainty/provenance diagnostics and a
 #'   logical `flagged` column.
-flag_uncertain_fallback_buckets <- function(final,
-                                            provenance_source = final,
-                                            fallback_threshold = 0.25,
-                                            ratio_threshold = 1,
-                                            normalized = TRUE) {
+flag_uncertain_fallback_bins <- function(final,
+                                         provenance_source = final,
+                                         fallback_threshold = 0.25,
+                                         ratio_threshold = 1,
+                                         normalized = TRUE) {
   pooled <- .extract_tbl(final, path = c("pooled", "estimates"))
   if (is.null(pooled)) {
     pooled <- .extract_tbl(final)
@@ -201,17 +203,17 @@ flag_uncertain_fallback_buckets <- function(final,
 
   .require_cols_plot(
     pooled,
-    c("horizon_bucket", "W", "B", "T"),
+    c("horizon_bin", "W", "B", "T"),
     "pooled_estimates"
   )
 
-  # Use the same replicate-aware site-bucket extraction used for spatial/provenance plotting
-  sb <- .extract_site_bucket_for_spatial_plot(provenance_source)
+  # Use the same replicate-aware site-bin extraction used for spatial/provenance plotting
+  sb <- .extract_site_bin_for_spatial_plot(provenance_source)
 
   .require_cols_plot(
     sb,
-    c("horizon_bucket"),
-    "site_bucket"
+    c("horizon_bin"),
+    "site_bin"
   )
 
   choose_cols <- function(tbl, normalized = TRUE) {
@@ -242,7 +244,7 @@ flag_uncertain_fallback_buckets <- function(final,
   cols <- choose_cols(sb, normalized = normalized)
 
   prov <- sb |>
-    dplyr::group_by(horizon_bucket) |>
+    dplyr::group_by(horizon_bin) |>
     dplyr::summarise(
       phase_system = sum(.data[[cols$phase]], na.rm = TRUE),
       site_fallback = sum(.data[[cols$fallback]], na.rm = TRUE),
@@ -258,9 +260,9 @@ flag_uncertain_fallback_buckets <- function(final,
   )
 
   out <- dplyr::left_join(
-    pooled[, c("horizon_bucket", "W", "B", "T"), drop = FALSE],
-    prov[, c("horizon_bucket", "phase_system", "site_fallback", "synthetic", "total_contribution", "fallback_share"), drop = FALSE],
-    by = "horizon_bucket"
+    pooled[, c("horizon_bin", "W", "B", "T"), drop = FALSE],
+    prov[, c("horizon_bin", "phase_system", "site_fallback", "synthetic", "total_contribution", "fallback_share"), drop = FALSE],
+    by = "horizon_bin"
   )
 
   out$BW_ratio <- ifelse(is.finite(out$W) & out$W > 0, out$B / out$W, NA_real_)
@@ -300,12 +302,12 @@ flag_uncertain_fallback_buckets <- function(final,
   NULL
 }
 
-.extract_site_bucket_replicates_for_plot <- function(x) {
+.extract_site_bin_replicates_for_plot <- function(x) {
   # finalized ensemble
   if (is.list(x) && !inherits(x, "data.frame") &&
       "replicate_data" %in% names(x) &&
-      "site_bucket" %in% names(x$replicate_data)) {
-    return(lapply(x$replicate_data$site_bucket, tibble::as_tibble))
+      "site_bin" %in% names(x$replicate_data)) {
+    return(lapply(x$replicate_data$site_bin, tibble::as_tibble))
   }
 
   # raw ensemble
@@ -314,8 +316,8 @@ flag_uncertain_fallback_buckets <- function(final,
     reps <- lapply(x$replicate_results, function(rr) {
       if (!is.null(rr$analysis) &&
           !is.null(rr$analysis$data) &&
-          !is.null(rr$analysis$data$site_bucket)) {
-        tibble::as_tibble(rr$analysis$data$site_bucket)
+          !is.null(rr$analysis$data$site_bin)) {
+        tibble::as_tibble(rr$analysis$data$site_bin)
       } else {
         NULL
       }
@@ -325,7 +327,7 @@ flag_uncertain_fallback_buckets <- function(final,
   }
 
   # single analysis object
-  sb <- .extract_tbl(x, path = c("data", "site_bucket"))
+  sb <- .extract_tbl(x, path = c("data", "site_bin"))
   if (!is.null(sb)) return(list(tibble::as_tibble(sb)))
 
   # plain table
@@ -334,24 +336,24 @@ flag_uncertain_fallback_buckets <- function(final,
   NULL
 }
 
-site_bucket_to_canonical_grid <- function(site_bucket_tbl, canonical_grid) {
-  site_bucket_tbl <- tibble::as_tibble(site_bucket_tbl)
+site_bin_to_canonical_grid <- function(site_bin_tbl, canonical_grid) {
+  site_bin_tbl <- tibble::as_tibble(site_bin_tbl)
   canonical_grid <- tibble::as_tibble(canonical_grid)
 
   .require_cols_plot(
-    site_bucket_tbl,
-    c("site_id", "bucket_start", "bucket_end"),
-    "site_bucket_tbl"
+    site_bin_tbl,
+    c("site_id", "bin_start", "bin_end"),
+    "site_bin_tbl"
   )
 
   .require_cols_plot(
     canonical_grid,
-    c("horizon_bucket", "bucket_start", "bucket_end"),
+    c("horizon_bin", "bin_start", "bin_end"),
     "canonical_grid"
   )
 
-  numeric_cols <- names(site_bucket_tbl)[vapply(site_bucket_tbl, is.numeric, logical(1))]
-  exclude_numeric <- c("bucket_start", "bucket_end", "horizon_bucket", "replicate_id")
+  numeric_cols <- names(site_bin_tbl)[vapply(site_bin_tbl, is.numeric, logical(1))]
+  exclude_numeric <- c("bin_start", "bin_end", "horizon_bin", "replicate_id")
   value_cols <- setdiff(numeric_cols, exclude_numeric)
 
   context_cols <- intersect(
@@ -360,7 +362,7 @@ site_bucket_to_canonical_grid <- function(site_bucket_tbl, canonical_grid) {
       "site_admin", "site_start", "site_end", "site_size", "site_dig_date",
       "normalization_mode"
     ),
-    names(site_bucket_tbl)
+    names(site_bin_tbl)
   )
 
   first_non_missing <- function(x) {
@@ -372,22 +374,22 @@ site_bucket_to_canonical_grid <- function(site_bucket_tbl, canonical_grid) {
     x[idx[1]]
   }
 
-  sites <- unique(site_bucket_tbl$site_id)
+  sites <- unique(site_bin_tbl$site_id)
   out_all <- vector("list", length(sites))
 
   for (s in seq_along(sites)) {
     sid <- sites[s]
-    stbl <- site_bucket_tbl[site_bucket_tbl$site_id == sid, , drop = FALSE]
+    stbl <- site_bin_tbl[site_bin_tbl$site_id == sid, , drop = FALSE]
 
     out_parts <- vector("list", nrow(canonical_grid))
 
     for (j in seq_len(nrow(canonical_grid))) {
-      c_start <- canonical_grid$bucket_start[j]
-      c_end   <- canonical_grid$bucket_end[j]
+      c_start <- canonical_grid$bin_start[j]
+      c_end   <- canonical_grid$bin_end[j]
 
       overlaps <- pmax(
         0,
-        pmin(stbl$bucket_end, c_end) - pmax(stbl$bucket_start, c_start)
+        pmin(stbl$bin_end, c_end) - pmax(stbl$bin_start, c_start)
       )
 
       keep <- overlaps > 0
@@ -395,9 +397,9 @@ site_bucket_to_canonical_grid <- function(site_bucket_tbl, canonical_grid) {
       if (!any(keep)) {
         row_j <- tibble::tibble(
           site_id = sid,
-          horizon_bucket = canonical_grid$horizon_bucket[j],
-          bucket_start = c_start,
-          bucket_end = c_end
+          horizon_bin = canonical_grid$horizon_bin[j],
+          bin_start = c_start,
+          bin_end = c_end
         )
 
         for (nm in value_cols) row_j[[nm]] <- 0
@@ -407,14 +409,14 @@ site_bucket_to_canonical_grid <- function(site_bucket_tbl, canonical_grid) {
         next
       }
 
-      widths <- stbl$bucket_end[keep] - stbl$bucket_start[keep]
+      widths <- stbl$bin_end[keep] - stbl$bin_start[keep]
       frac <- overlaps[keep] / widths
 
       row_j <- tibble::tibble(
         site_id = sid,
-        horizon_bucket = canonical_grid$horizon_bucket[j],
-        bucket_start = c_start,
-        bucket_end = c_end
+        horizon_bin = canonical_grid$horizon_bin[j],
+        bin_start = c_start,
+        bin_end = c_end
       )
 
       for (nm in value_cols) {
@@ -434,17 +436,17 @@ site_bucket_to_canonical_grid <- function(site_bucket_tbl, canonical_grid) {
   dplyr::bind_rows(out_all)
 }
 
-summarize_site_bucket_across_replicates <- function(site_bucket_replicates,
-                                                    canonical_grid = NULL) {
-  if (is.null(site_bucket_replicates) || length(site_bucket_replicates) == 0) {
-    rlang::abort("No site-bucket replicate tables available.")
+summarize_site_bin_across_replicates <- function(site_bin_replicates,
+                                                 canonical_grid = NULL) {
+  if (is.null(site_bin_replicates) || length(site_bin_replicates) == 0) {
+    rlang::abort("No site-bin replicate tables available.")
   }
 
-  reps <- lapply(seq_along(site_bucket_replicates), function(i) {
-    sb <- tibble::as_tibble(site_bucket_replicates[[i]])
+  reps <- lapply(seq_along(site_bin_replicates), function(i) {
+    sb <- tibble::as_tibble(site_bin_replicates[[i]])
 
     if (!is.null(canonical_grid)) {
-      sb <- site_bucket_to_canonical_grid(sb, canonical_grid)
+      sb <- site_bin_to_canonical_grid(sb, canonical_grid)
     }
 
     sb$replicate_id <- i
@@ -455,8 +457,8 @@ summarize_site_bucket_across_replicates <- function(site_bucket_replicates,
 
   .require_cols_plot(
     dat,
-    c("site_id", "horizon_bucket", "bucket_start", "bucket_end"),
-    "site_bucket_replicates"
+    c("site_id", "horizon_bin", "bin_start", "bin_end"),
+    "site_bin_replicates"
   )
 
   numeric_cols <- names(dat)[vapply(dat, is.numeric, logical(1))]
@@ -492,7 +494,7 @@ summarize_site_bucket_across_replicates <- function(site_bucket_replicates,
   )
 
   dat |>
-    dplyr::group_by(site_id, horizon_bucket, bucket_start, bucket_end) |>
+    dplyr::group_by(site_id, horizon_bin, bin_start, bin_end) |>
     dplyr::summarise(
       !!!avg_exprs,
       !!!context_exprs,
@@ -502,12 +504,12 @@ summarize_site_bucket_across_replicates <- function(site_bucket_replicates,
     tibble::as_tibble()
 }
 
-.extract_site_bucket_for_spatial_plot <- function(x) {
-  reps <- .extract_site_bucket_replicates_for_plot(x)
+.extract_site_bin_for_spatial_plot <- function(x) {
+  reps <- .extract_site_bin_replicates_for_plot(x)
 
   if (is.null(reps)) {
     rlang::abort(
-      "Could not extract site-bucket data for spatial plotting. Supply an analysis object, an ensemble object, a finalized ensemble object, or a site_bucket table."
+      "Could not extract site-bin data for spatial plotting. Supply an analysis object, an ensemble object, a finalized ensemble object, or a site_bin table."
     )
   }
 
@@ -520,12 +522,15 @@ summarize_site_bucket_across_replicates <- function(site_bucket_replicates,
     canonical_grid <- tibble::as_tibble(x$pooled$canonical_grid)
   }
 
-  summarize_site_bucket_across_replicates(reps, canonical_grid = canonical_grid)
+  summarize_site_bin_across_replicates(reps, canonical_grid = canonical_grid)
 }
 .require_cols_plot <- function(tbl, cols, name = "table") {
   validate_required_fields(tbl, cols, name)
   invisible(TRUE)
 }
+
+#' Function for plotting the already constructed harmonization table for
+#' publication purposes.
 
 plot_harmonization_table_merged <- function(chronology,
                                             save_path = NULL,
@@ -670,7 +675,7 @@ plot_harmonization_table_merged <- function(chronology,
     ggplot2::labs(
       title = "Chronology harmonization",
       #subtitle = sprintf("Grid width=%s · offset=%s", grid_width, grid_offset),
-      x = "Pseudo Horizon (PHU)",
+      x = "Pseudo-horizon units (PHU)",
       y = "Systems"
     ) +
     ggplot2::theme(
@@ -833,8 +838,8 @@ plot_harmonization_table_merged <- function(chronology,
 #' @param save_path Optional file path for saving.
 #' @param show_points Show points.
 #' @param show_ci Show CI ribbon/error bars if available.
-#' @param add_loess Add loess smoother.
-#' @param loess_span Loess span.
+#' @param add_loess Add descriptive LOESS smoother (not an inferential band).
+#' @param loess_span LOESS span for descriptive smoothing.
 #'
 #' @return ggplot object.
 plot_occupancy_curve <- function(pooled_estimates,
@@ -863,13 +868,13 @@ plot_occupancy_curve <- function(pooled_estimates,
     rlang::abort("No plottable estimate column found.")
   }
 
-  .require_cols_plot(dat, c("horizon_bucket", ycol), "pooled_estimates")
+  .require_cols_plot(dat, c("horizon_bin", ycol), "pooled_estimates")
 
   dat <- tibble::as_tibble(dat) |>
-    dplyr::mutate(horizon_bucket = as.numeric(.data$horizon_bucket)) |>
-    dplyr::filter(is.finite(.data$horizon_bucket), is.finite(.data[[ycol]]))
+    dplyr::mutate(horizon_bin = as.numeric(.data$horizon_bin)) |>
+    dplyr::filter(is.finite(.data$horizon_bin), is.finite(.data[[ycol]]))
 
-  p <- ggplot2::ggplot(dat, ggplot2::aes(x = .data$horizon_bucket, y = .data[[ycol]]))
+  p <- ggplot2::ggplot(dat, ggplot2::aes(x = .data$horizon_bin, y = .data[[ycol]]))
 
   if (show_ci_ribbon && all(c("lower", "upper") %in% names(dat))) {
     p <- p +
@@ -898,6 +903,8 @@ plot_occupancy_curve <- function(pooled_estimates,
     p <- p + ggplot2::geom_line(linewidth = 0.8, colour = .ocp_palette$coral)
   }
 
+  # Default ggplot LOESS bands describe the smoother, not the full
+  # replicate uncertainty. Use replicate-wise LOESS bands when available.
   if (add_loess) {
     p <- p +
       ggplot2::geom_smooth(
@@ -927,16 +934,16 @@ plot_occupancy_curve <- function(pooled_estimates,
 
 #' Plot regional curves
 #'
-#' @param region_bucket Region-by-bucket table, or object containing it.
+#' @param region_bin Region-by-bin table, or object containing it.
 #' @param region_col Region column name.
 #' @param facet If TRUE, facet regions in one figure.
 #' @param save_path Optional file path for saving the faceted plot.
 #' @param save_dir Optional directory for one-file-per-region export.
-#' @param add_loess Add loess smoother.
-#' @param loess_span Loess span.
+#' @param add_loess Add descriptive LOESS smoother (not an inferential band).
+#' @param loess_span LOESS span for descriptive smoothing.
 #'
 #' @return ggplot object or list of ggplots if facet = FALSE and save_dir is NULL.
-plot_regional_curves <- function(region_bucket,
+plot_regional_curves <- function(region_bin,
                                  region_col = "site_region",
                                  facet = TRUE,
                                  save_path = NULL,
@@ -948,12 +955,12 @@ plot_regional_curves <- function(region_bucket,
                                  add_loess = TRUE,
                                  loess_span = 0.75,
                                  subtitle = NULL) {
-  dat <- .extract_tbl(region_bucket, path = c("pooled", "region_estimates"))
-  if (is.null(dat)) dat <- .extract_tbl(region_bucket, path = c("data", "region_bucket"))
-  if (is.null(dat)) dat <- .extract_tbl(region_bucket)
+  dat <- .extract_tbl(region_bin, path = c("pooled", "region_estimates"))
+  if (is.null(dat)) dat <- .extract_tbl(region_bin, path = c("data", "region_bin"))
+  if (is.null(dat)) dat <- .extract_tbl(region_bin)
 
   if (is.null(dat)) {
-    rlang::abort("Could not extract region_bucket or pooled region_estimates.")
+    rlang::abort("Could not extract region_bin or pooled region_estimates.")
   }
 
   if (!region_col %in% names(dat)) {
@@ -970,19 +977,19 @@ plot_regional_curves <- function(region_bucket,
     rlang::abort("No plottable value column found for regional curves.")
   }
 
-  .require_cols_plot(dat, c("horizon_bucket", region_col, ycol), "region_bucket")
+  .require_cols_plot(dat, c("horizon_bin", region_col, ycol), "region_bin")
 
   dat <- tibble::as_tibble(dat) |>
     dplyr::filter(!is.na(.data[[region_col]]), .data[[region_col]] != "") |>
-    dplyr::mutate(horizon_bucket = as.numeric(.data$horizon_bucket)) |>
-    dplyr::filter(is.finite(.data$horizon_bucket), is.finite(.data[[ycol]]))
+    dplyr::mutate(horizon_bin = as.numeric(.data$horizon_bin)) |>
+    dplyr::filter(is.finite(.data$horizon_bin), is.finite(.data[[ycol]]))
 
   if (nrow(dat) == 0) {
     rlang::abort("No non-missing regional rows available to plot.")
   }
 
   if (facet) {
-    p <- ggplot2::ggplot(dat, ggplot2::aes(x = .data$horizon_bucket, y = .data[[ycol]]))
+    p <- ggplot2::ggplot(dat, ggplot2::aes(x = .data$horizon_bin, y = .data[[ycol]]))
 
     if (show_ci_ribbon && all(c("lower", "upper") %in% names(dat))) {
       p <- p +
@@ -1042,7 +1049,7 @@ plot_regional_curves <- function(region_bucket,
   plots <- lapply(regs, function(reg) {
     d <- dat[dat[[region_col]] == reg, , drop = FALSE]
 
-    p <- ggplot2::ggplot(d, ggplot2::aes(x = .data$horizon_bucket, y = .data[[ycol]]))
+    p <- ggplot2::ggplot(d, ggplot2::aes(x = .data$horizon_bin, y = .data[[ycol]]))
 
     if (show_ci_ribbon && all(c("lower", "upper") %in% names(d))) {
       p <- p +
@@ -1108,7 +1115,7 @@ plot_regional_curves <- function(region_bucket,
 
 #' Plot fallback share against between/within uncertainty ratio
 #'
-#' @param diag_tbl Output from `flag_uncertain_fallback_buckets()`.
+#' @param diag_tbl Output from `flag_uncertain_fallback_bins()`.
 #' @param save_path Optional file path for saving.
 #'
 #' @return ggplot object.
@@ -1119,14 +1126,14 @@ plot_fallback_uncertainty_diagnostic <- function(diag_tbl,
 
   .require_cols_plot(
     diag_tbl,
-    c("horizon_bucket", "fallback_share", "BW_ratio"),
+    c("horizon_bin", "fallback_share", "BW_ratio"),
     "diag_tbl"
   )
 
   p <- ggplot2::ggplot(
     diag_tbl,
     ggplot2::aes(
-      x = horizon_bucket,
+      x = horizon_bin,
       y = BW_ratio,
       fill = fallback_share
     )
@@ -1144,7 +1151,7 @@ plot_fallback_uncertainty_diagnostic <- function(diag_tbl,
     ) +
     ggplot2::labs(
       title = "Fallback-driven uncertainty diagnostic",
-      x = "Horizon bucket",
+      x = "Horizon bin",
       y = "Between / Within variance ratio (B/W)"
     ) +
     .ocp_theme()
@@ -1173,7 +1180,7 @@ plot_uncertainty_components <- function(components,
     rlang::abort("Could not extract uncertainty components.")
   }
 
-  .require_cols_plot(dat, c("horizon_bucket", "component", "variance"), "components")
+  .require_cols_plot(dat, c("horizon_bin", "component", "variance"), "components")
 
   comp_cols <- c(
     within = .ocp_palette$teal,
@@ -1181,14 +1188,14 @@ plot_uncertainty_components <- function(components,
     total = .ocp_palette$coral
   )
 
-  p <- ggplot2::ggplot(dat, ggplot2::aes(x = horizon_bucket, y = variance, colour = component, fill = component)) +
+  p <- ggplot2::ggplot(dat, ggplot2::aes(x = horizon_bin, y = variance, colour = component, fill = component)) +
     ggplot2::geom_line(linewidth = 0.8) +
     ggplot2::geom_area(alpha = 0.18, position = "identity") +
     ggplot2::scale_colour_manual(values = comp_cols) +
     ggplot2::scale_fill_manual(values = comp_cols) +
     ggplot2::labs(
       title = "Uncertainty components",
-      x = "Horizon bucket",
+      x = "Horizon bin",
       y = "Variance"
     ) +
     .ocp_theme()
@@ -1201,21 +1208,21 @@ plot_uncertainty_components <- function(components,
 # Provenance contributions
 # -------------------------------------------------------------------------
 
-#' Plot provenance contributions across buckets
+#' Plot provenance contributions across bins
 #'
-#' @param site_bucket Site-bucket table, or object containing it.
+#' @param site_bin Site-bin table, or object containing it.
 #' @param normalized If TRUE, use normalized provenance columns where present.
 #' @param save_path Optional file path for saving.
 #'
 #' @return ggplot object.
-plot_provenance_contributions <- function(site_bucket,
+plot_provenance_contributions <- function(site_bin,
                                           normalized = TRUE,
                                           save_path = NULL) {
 
   # Use the same replicate-aware extractor used for spatial plotting
-  sb <- .extract_site_bucket_for_spatial_plot(site_bucket)
+  sb <- .extract_site_bin_for_spatial_plot(site_bin)
 
-  .require_cols_plot(sb, c("horizon_bucket"), "site_bucket")
+  .require_cols_plot(sb, c("horizon_bin"), "site_bin")
 
   choose_cols <- function(tbl, normalized = TRUE) {
 
@@ -1248,7 +1255,7 @@ plot_provenance_contributions <- function(site_bucket,
   cols <- choose_cols(sb, normalized = normalized)
 
   agg <- sb |>
-    dplyr::group_by(horizon_bucket) |>
+    dplyr::group_by(horizon_bin) |>
     dplyr::summarise(
       phase_system = sum(.data[[cols$phase]], na.rm = TRUE),
       site_fallback = sum(.data[[cols$fallback]], na.rm = TRUE),
@@ -1258,17 +1265,17 @@ plot_provenance_contributions <- function(site_bucket,
 
   long <- dplyr::bind_rows(
     tibble::tibble(
-      horizon_bucket = agg$horizon_bucket,
+      horizon_bin = agg$horizon_bin,
       source = "phase_system",
       value = agg$phase_system
     ),
     tibble::tibble(
-      horizon_bucket = agg$horizon_bucket,
+      horizon_bin = agg$horizon_bin,
       source = "site_fallback",
       value = agg$site_fallback
     ),
     tibble::tibble(
-      horizon_bucket = agg$horizon_bucket,
+      horizon_bin = agg$horizon_bin,
       source = "synthetic",
       value = agg$synthetic
     )
@@ -1281,14 +1288,14 @@ plot_provenance_contributions <- function(site_bucket,
   )
 
   p <- ggplot2::ggplot(long,
-                       ggplot2::aes(x = horizon_bucket,
+                       ggplot2::aes(x = horizon_bin,
                                     y = value,
                                     fill = source)) +
     ggplot2::geom_col(position = "stack") +
     ggplot2::scale_fill_manual(values = src_cols) +
     ggplot2::labs(
-      title = "Provenance contributions by bucket",
-      x = "Horizon bucket",
+      title = "Provenance contributions by bin",
+      x = "Horizon bin",
       y = "Contribution"
     ) +
     .ocp_theme()
@@ -1302,21 +1309,21 @@ plot_provenance_contributions <- function(site_bucket,
 # Spatial slices
 # -------------------------------------------------------------------------
 
-#' Plot spatial slices for selected buckets
+#' Plot spatial slices for selected bins
 #'
-#' @param site_bucket Site-bucket table, or object containing it.
-#' @param selected_buckets Numeric vector of bucket IDs to show.
+#' @param site_bin Site-bin table, or object containing it.
+#' @param selected_bins Numeric vector of bin IDs to show.
 #' @param use_normalized If TRUE, prefer normalized value columns.
 #' @param point_colour Point outline colour.
 #' @param point_alpha Point alpha.
 #' @param bbox Optional numeric vector c(xmin, xmax, ymin, ymax).
-#' @param facet If TRUE, facet selected buckets in one figure.
+#' @param facet If TRUE, facet selected bins in one figure.
 #' @param save_path Optional file path for saving the faceted figure.
-#' @param save_dir Optional directory for one-file-per-bucket output.
+#' @param save_dir Optional directory for one-file-per-bin output.
 #'
 #' @return ggplot object or list of ggplots.
-plot_spatial_slices <- function(site_bucket,
-                                selected_buckets,
+plot_spatial_slices <- function(site_bin,
+                                selected_bins,
                                 use_normalized = FALSE,
                                 point_colour = .ocp_palette$point_red,
                                 point_alpha = 0.6,
@@ -1325,9 +1332,9 @@ plot_spatial_slices <- function(site_bucket,
                                 save_path = NULL,
                                 save_dir = NULL,
                                 bins = 7) {
-  sb <- .extract_site_bucket_for_spatial_plot(site_bucket)
+  sb <- .extract_site_bin_for_spatial_plot(site_bin)
 
-  .require_cols_plot(sb, c("site_id", "horizon_bucket", "coord_x", "coord_y"), "site_bucket")
+  .require_cols_plot(sb, c("site_id", "horizon_bin", "coord_x", "coord_y"), "site_bin")
 
   value_col <- NULL
   if (use_normalized && "value_norm" %in% names(sb)) {
@@ -1343,13 +1350,13 @@ plot_spatial_slices <- function(site_bucket,
   }
 
   dat <- sb |>
-    dplyr::filter(.data$horizon_bucket %in% selected_buckets) |>
+    dplyr::filter(.data$horizon_bin %in% selected_bins) |>
     dplyr::filter(is.finite(.data$coord_x), is.finite(.data$coord_y)) |>
     dplyr::filter(is.finite(.data[[value_col]])) |>
     dplyr::filter(.data[[value_col]] > 0)
 
   if (nrow(dat) == 0) {
-    rlang::abort("No rows available for the requested spatial buckets.")
+    rlang::abort("No rows available for the requested spatial bins.")
   }
 
   bg <- .get_world_basemap(bbox = bbox)
@@ -1405,15 +1412,15 @@ plot_spatial_slices <- function(site_bucket,
 
   if (facet) {
     p <- base_plot +
-      ggplot2::facet_wrap(~ horizon_bucket) +
-      ggplot2::labs(title = "Spatial density by horizon bucket")
+      ggplot2::facet_wrap(~ horizon_bin) +
+      ggplot2::labs(title = "Spatial density by horizon bin")
 
     .save_plot_optional(p, save_path = save_path, width = 12, height = 8)
     return(p)
   }
 
-  plots <- lapply(sort(unique(dat$horizon_bucket)), function(hb) {
-    d <- dat[dat$horizon_bucket == hb, , drop = FALSE]
+  plots <- lapply(sort(unique(dat$horizon_bin)), function(hb) {
+    d <- dat[dat$horizon_bin == hb, , drop = FALSE]
 
     p <- ggplot2::ggplot() +
       ggplot2::geom_sf(
@@ -1439,7 +1446,7 @@ plot_spatial_slices <- function(site_bucket,
         alpha = point_alpha,
         show.legend = c(size = TRUE)
       ) +
-      ggplot2::labs(title = sprintf("Horizon Bucket: %s", hb)) +
+      ggplot2::labs(title = sprintf("Horizon Bin: %s", hb)) +
       .ocp_spatial_map_style(
         use_normalized = use_normalized,
         point_colour = point_colour,
@@ -1466,7 +1473,7 @@ plot_spatial_slices <- function(site_bucket,
     p
   })
 
-  names(plots) <- as.character(sort(unique(dat$horizon_bucket)))
+  names(plots) <- as.character(sort(unique(dat$horizon_bin)))
   plots
 }
 
@@ -1474,11 +1481,11 @@ plot_spatial_slices <- function(site_bucket,
 # Spatial animation
 # -------------------------------------------------------------------------
 
-#' Animate spatial density over horizon buckets
+#' Animate spatial density over horizon bins
 #'
-#' @param site_bucket Site-bucket table, or object containing it.
+#' @param site_bin Site-bin table, or object containing it.
 #' @param use_normalized If TRUE, prefer normalized value columns.
-#' @param bucket_bin Optional integer bin size to aggregate neighboring buckets.
+#' @param bin_group_size Optional integer bin size to aggregate neighboring bins.
 #' @param point_colour Point colour.
 #' @param point_alpha Point alpha.
 #' @param bbox Optional numeric vector c(xmin, xmax, ymin, ymax).
@@ -1493,9 +1500,9 @@ plot_spatial_slices <- function(site_bucket,
 #' @param bins Number of density bins.
 #'
 #' @return Animated plot object.
-animate_spatial_density <- function(site_bucket,
+animate_spatial_density <- function(site_bin,
                                     use_normalized = FALSE,
-                                    bucket_bin = NULL,
+                                    bin_group_size = NULL,
                                     point_colour = .ocp_palette$point_red,
                                     point_alpha = 0.6,
                                     bbox = NULL,
@@ -1512,9 +1519,9 @@ animate_spatial_density <- function(site_bucket,
     rlang::abort("`gganimate` is required for `animate_spatial_density()`.")
   }
 
-  sb <- .extract_site_bucket_for_spatial_plot(site_bucket)
+  sb <- .extract_site_bin_for_spatial_plot(site_bin)
 
-  .require_cols_plot(sb, c("site_id", "horizon_bucket", "coord_x", "coord_y"), "site_bucket")
+  .require_cols_plot(sb, c("site_id", "horizon_bin", "coord_x", "coord_y"), "site_bin")
 
   value_col <- NULL
   if (use_normalized && "value_norm" %in% names(sb)) {
@@ -1538,16 +1545,16 @@ animate_spatial_density <- function(site_bucket,
     rlang::abort("No rows available for spatial animation.")
   }
 
-  if (!is.null(bucket_bin) && is.numeric(bucket_bin) && bucket_bin > 1) {
+  if (!is.null(bin_group_size) && is.numeric(bin_group_size) && bin_group_size > 1) {
     dat <- dat |>
-      dplyr::mutate(combined_bucket = floor(.data$horizon_bucket / bucket_bin) * bucket_bin)
+      dplyr::mutate(combined_bin = floor(.data$horizon_bin / bin_group_size) * bin_group_size)
   } else {
     dat <- dat |>
-      dplyr::mutate(combined_bucket = .data$horizon_bucket)
+      dplyr::mutate(combined_bin = .data$horizon_bin)
   }
 
   dat <- dat |>
-    dplyr::group_by(.data$combined_bucket) |>
+    dplyr::group_by(.data$combined_bin) |>
     dplyr::filter(dplyr::n() > 1) |>
     dplyr::ungroup()
 
@@ -1588,9 +1595,9 @@ animate_spatial_density <- function(site_bucket,
       point_colour = point_colour,
       alpha_range = c(0.1, 0.9)
     ) +
-    ggplot2::labs(title = "Horizon Bucket: {closest_state}") +
+    ggplot2::labs(title = "Horizon Bin: {closest_state}") +
     gganimate::transition_states(
-      states = combined_bucket,
+      states = combined_bin,
       transition_length = transition_length,
       state_length = state_length
     ) +
@@ -1642,4 +1649,18 @@ animate_spatial_density <- function(site_bucket,
   }
 
   anim
+}
+
+
+# -------------------------------------------------------------------------
+# Legacy aliases
+# -------------------------------------------------------------------------
+# The package now uses "bin" terminology. These wrappers keep older scripts
+# from failing immediately while making new output use the bin-based API.
+flag_uncertain_fallback_buckets <- function(...) flag_uncertain_fallback_bins(...)
+site_bucket_to_canonical_grid <- function(site_bucket_tbl, canonical_grid) {
+  site_bin_to_canonical_grid(site_bucket_tbl, canonical_grid)
+}
+summarize_site_bucket_across_replicates <- function(site_bucket_replicates, canonical_grid = NULL) {
+  summarize_site_bin_across_replicates(site_bucket_replicates, canonical_grid = canonical_grid)
 }
